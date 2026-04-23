@@ -24,7 +24,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 # ---- [Maintenance] ----
 
 # replication
-0 */3 * * *  Rscript --default-packages=dup -e 'check_replication("scidb", "scidb_maoraves")'
+*/10 * * * *  Rscript --default-packages=dup -e 'check_replication("scidb", "scidb_maoraves")'
 
 # backup
 # 0 0        * * *    Rscript --default-packages=dup -e 'backup.pipeline()'     
