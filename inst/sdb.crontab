@@ -39,9 +39,13 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 #NZ
 0 */1  * * *  Rscript --default-packages=dup -e 'db_copy("FIELD_2025_BADOatNZ", "remotehost_1", "host")'
 
+# chick finder
+0 */12  * * *  Rscript --default-packages=dup -e 'db_copy("dotterelFinder", "remotehost_1", "host")'
 
-# DOCUWIKI BACKUP
-0 1        * * *    duplicity --no-encryption /media/DATA/WIKIS/html file:///ds/scidbbackup/dokuwiki_backups/duplicity/
+
+
+# DOCUWIKI BACKUP (TODO)
+# 0 1        * * *    duplicity --no-encryption /media/DATA/WIKIS/html file:///ds/scidbbackup/dokuwiki_backups/duplicity/
 
 # internal updates
 3 22        * * *   Rscript --default-packages=dup -e 'DB_internal_updates.pipeline()'
