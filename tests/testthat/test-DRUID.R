@@ -8,6 +8,9 @@ test_that("GPS preparation follows the database schema", {
     longitude = 8.344182,
     latitude = 52.551568,
     speed = 0.1,
+    used_star = -99999,
+    view_star = -99999,
+    quality = -99999,
     sample_type = list(c(1, 4))
   )
 
@@ -43,6 +46,9 @@ test_that("GPS preparation follows the database schema", {
   expect_equal(result$id, "68d4a842c3d77b735bfd9d96")
   expect_equal(result$updated_at, "2026-06-01 13:05:13.775000")
   expect_equal(result$timestamp, "2026-06-01 00:00:30.979000")
+  expect_equal(result$used_star, -99999)
+  expect_equal(result$view_star, -99999)
+  expect_equal(result$quality, -99999)
   expect_equal(result$sample_type, 5)
 })
 
