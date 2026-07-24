@@ -11,17 +11,18 @@ DRUID_update(verbose = interactive())
 \code{interactive()}.}
 }
 \value{
-Invisibly, a list containing the number of devices added and a GPS
-update summary by device.
+Invisibly, a list containing the number of devices added and GPS,
+ODBA, ENV, and behaviour update summaries by device.
 }
 \description{
 Logs in to Ecotopia using the \code{druid_api} configuration, updates the device
-list, and downloads new and recently transmitted GPS records. Each device is
-updated independently, so a failure for one device does not discard data
-downloaded for the others.
+list, and downloads new and recently transmitted GPS, ODBA, ENV, and raw ML
+behaviour records. Each device and data type is updated independently.
 }
 \details{
-Devices without GPS rows are downloaded from 2000-01-01. Existing devices
-are resumed two days before their latest stored collection time, and
-rows whose \verb{(id, timestamp)} key is already present are left unchanged.
+Devices without stored rows are downloaded from 2000-01-01. Existing devices
+are resumed two days before their latest stored collection time, and rows
+whose \verb{(id, timestamp)} key is already present are left unchanged.
+Structured ML behaviour payloads are stored as raw base64 and are not passed
+through \code{ecotopia_postprocess_structured()}.
 }
