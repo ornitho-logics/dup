@@ -9,7 +9,7 @@ try_outcome(..., message)
 \arguments{
 \item{...}{one or several try() values}
 
-\item{message}{to pass to push_msg}
+\item{message}{warning message emitted when an input contains an error}
 }
 \description{
 Try outcome

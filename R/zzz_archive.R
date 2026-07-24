@@ -6,11 +6,11 @@ BUTEOatEUROPE.pipeline <- function() {
 
   cat(blue$bold('\n ----> Update gps table.....\n'))
   a = scidbupdate_mti_gps.BUTEOatEUROPE()
-  push_msg(a, 'BUTEOatEUROPE.mti_gps')
+  message(a)
 
   cat(green$bold('\n ----> Update sensors table....\n'))
   b = scidbupdate_mti_sensors.BUTEOatEUROPE()
-  push_msg(b, 'BUTEOatEUROPE.mti_sensors')
+  message(b)
 }
 SNBatWESTERHOLZ2_pipeline <- function() {
   a = scidb_snbUpdater.b000()
@@ -19,7 +19,7 @@ SNBatWESTERHOLZ2_pipeline <- function() {
 
   # feedback
   m = glue(a, b)
-  push_msg(m, 'SNBatWESTERHOLZ2_pipeline')
+  message(m)
 }
 read_boxtxt <- function(f) {
   cnf = config::get('dir')

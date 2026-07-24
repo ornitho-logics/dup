@@ -32,6 +32,6 @@ no new emails are disregarded.
 \dontrun{
  dup::extract_email_attachements(maildir = 'ARGOS', onlynew = FALSE)
  extract_email_attachements(maildir = 'GSM_MTI', onlynew = FALSE)
- 
+
 }
 }

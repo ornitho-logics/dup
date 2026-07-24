@@ -1,7 +1,8 @@
 #' @import methods utils stats RMariaDB RSQLite data.table
 #' @import dbo apis
-#' @import magrittr stringr glue pushoverr  anytime crayon forcats
-#' @import foreach future doFuture
+#' @import magrittr stringr glue anytime forcats
+#' @import foreach
+#' @importFrom crayon red blue green
 #' @import fs ssh
 #' @import webp
 #' @importFrom  imager width  height resize  imresize load.image save.image crop.borders

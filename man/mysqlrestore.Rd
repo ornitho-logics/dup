@@ -15,7 +15,7 @@ mysqlrestore(file, db, user, pwd, host = "127.0.0.1", dryrun = FALSE)
 
 \item{host}{default to  '127.0.0.1'}
 
-\item{dryrun}{only print the mysql cli call and exit}
+\item{dryrun}{only print the mariadb cli call and exit}
 }
 \description{
 restore sql file locally

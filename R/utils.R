@@ -59,16 +59,6 @@ mins_taken <- function(x) {
   o = difftime(Sys.time(), x, units = 'mins') %>% round(digits = 1)
   glue('{o} minutes taken.')
 }
-#' @export
-push_msg <- function(x, title, cnf = config::get('pushover')) {
-  x = paste(x, collapse = ' ')
-  pushoverr::pushover(
-    message = x,
-    title = title,
-    user = cnf$user,
-    app = cnf$app
-  )
-}
 #' argosfilenam2date
 #' @export
 argosfilenam2date <- function(x, sepDate = "") {
@@ -118,13 +108,13 @@ dir_size <- function(dr) {
 
 #' Try outcome
 #' @param ... one or several try() values
-#' @param message to pass to push_msg
+#' @param message warning message emitted when an input contains an error
 #' @export
 try_outcome <- function(..., message) {
   x = list(...)
   gotError = sapply(x, inherits, what = "try-error") |> any()
   if (gotError) {
-    push_msg(message, "dup")
+    warning(message, call. = FALSE)
   }
 
   !gotError
