@@ -4,7 +4,11 @@
 \alias{DRUID_update}
 \title{Run the DRUID database update}
 \usage{
-DRUID_update()
+DRUID_update(verbose = interactive())
+}
+\arguments{
+\item{verbose}{Show stage and per-device progress. Defaults to
+\code{interactive()}.}
 }
 \value{
 Invisibly, a list containing the number of devices added and a GPS
@@ -18,6 +22,6 @@ downloaded for the others.
 }
 \details{
 Devices without GPS rows are downloaded from 2000-01-01. Existing devices
-are resumed seven days before their latest stored collection time, and
+are resumed two days before their latest stored collection time, and
 rows whose \verb{(id, timestamp)} key is already present are left unchanged.
 }

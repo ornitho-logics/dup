@@ -1,18 +1,16 @@
 #' Run the DRUID database update
 #'
-#' Logs in to Ecotopia using the `druid_api` configuration, updates the device
-#' list, and downloads new and recently transmitted GPS records. Each device is
-#' updated independently, so a failure for one device does not discard data
-#' downloaded for the others.
+#' Logs in to Ecotopia using the `druid_api` configuration, updates the device list, and downloads new and recently transmitted GPS records. Each device is updated independently, so a failure for one device does not discard data downloaded for the others.
 #'
-#' Devices without GPS rows are downloaded from 2000-01-01. Existing devices
-#' are resumed seven days before their latest stored collection time, and
-#' rows whose `(id, timestamp)` key is already present are left unchanged.
+#' Devices without GPS rows are downloaded from 2000-01-01. Existing devices are resumed two days before their latest stored collection time, and rows whose `(id, timestamp)` key is already present are left unchanged.
 #'
-#' @return Invisibly, a list containing the number of devices added and a GPS
-#'   update summary by device.
+#' @param verbose Show stage and per-device progress. Defaults to
+#'   [interactive()].
+#'
+#' @return Invisibly, a list containing the number of devices added and a GPS update summary by device.
 #' @export
-DRUID_update <- function() {
+DRUID_update <- function(verbose = interactive()) {
+  .druid_inform(verbose, "DRUID: authenticating with Ecotopia.")
   credentials <- .druid_credentials()
 
   logstring <- ecotopia_login(
@@ -23,13 +21,29 @@ DRUID_update <- function() {
     verbose = FALSE
   )
 
+  .druid_inform(verbose, "DRUID: updating the device list.")
   devices_added <- .druid_update_device_list(logstring)
-  gps <- .druid_update_gps(logstring)
+  .druid_inform(
+    verbose,
+    glue("DRUID: device list complete; {devices_added} new device(s).")
+  )
+
+  gps <- .druid_update_gps(logstring, verbose = verbose)
+  .druid_inform(verbose, "DRUID: update complete.")
 
   invisible(list(
     devices_added = devices_added,
     gps = gps
   ))
+}
+
+
+.druid_inform <- function(verbose, text) {
+  if (verbose) {
+    message(text)
+  }
+
+  invisible(NULL)
 }
 
 
@@ -86,13 +100,17 @@ DRUID_update <- function() {
     return(as.integer(x))
   }
 
-  vapply(x, function(value) {
-    if (length(value) == 0 || all(is.na(value))) {
-      return(as.integer(NA))
-    }
+  vapply(
+    x,
+    function(value) {
+      if (length(value) == 0 || all(is.na(value))) {
+        return(as.integer(NA))
+      }
 
-    as.integer(sum(value, na.rm = TRUE))
-  }, integer(1))
+      as.integer(sum(value, na.rm = TRUE))
+    },
+    integer(1)
+  )
 }
 
 
@@ -153,8 +171,7 @@ DRUID_update <- function() {
     !column_order %in% c("id", "timestamp")
   ]
 
-  output <- output[
-    ,
+  output <- output[,
     lapply(.SD, function(value) {
       value[match(FALSE, is.na(value), nomatch = 1)]
     }),
@@ -278,12 +295,19 @@ DRUID_update <- function() {
 
 .druid_update_gps <- function(
   logstring,
-  overlap = lubridate::days(7),
-  initial_datetime = "2000-01-01T00:00:00Z"
+  overlap = lubridate::days(2),
+  initial_datetime = "2000-01-01T00:00:00Z",
+  verbose = interactive()
 ) {
   devices <- .druid_gps_watermarks()
+  total_devices <- nrow(devices)
 
-  results <- lapply(seq_len(nrow(devices)), function(i) {
+  .druid_inform(
+    verbose,
+    glue("GPS: {total_devices} device(s) to update.")
+  )
+
+  results <- lapply(seq_len(total_devices), function(i) {
     device_id <- devices$id[i]
     last_timestamp <- devices$last_timestamp[i]
 
@@ -299,7 +323,15 @@ DRUID_update <- function() {
       )
     }
 
-    tryCatch(
+    .druid_inform(
+      verbose,
+      glue(
+        "GPS [{i}/{total_devices}] {device_id}: ",
+        "downloading from {from}."
+      )
+    )
+
+    result <- tryCatch(
       {
         downloaded <- ecotopia_data(
           logstring,
@@ -331,6 +363,26 @@ DRUID_update <- function() {
         )
       }
     )
+
+    if (result$success) {
+      .druid_inform(
+        verbose,
+        glue(
+          "GPS [{i}/{total_devices}] {device_id}: ",
+          "{result$downloaded} downloaded, {result$affected} inserted."
+        )
+      )
+    } else {
+      .druid_inform(
+        verbose,
+        glue(
+          "GPS [{i}/{total_devices}] {device_id}: ",
+          "failed: {result$error}"
+        )
+      )
+    }
+
+    result
   })
 
   if (length(results) == 0) {

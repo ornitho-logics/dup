@@ -192,7 +192,12 @@ test_that("GPS update populates an empty table and overlaps existing data", {
     .druid_insert_gps = function(gps) nrow(gps)
   )
 
-  result <- .druid_update_gps("token")
+  messages <- capture_messages(
+    result <- .druid_update_gps("token", verbose = TRUE)
+  )
+  expect_true(
+    any(grepl("GPS \\[1/2\\] new-device", messages))
+  )
 
   expect_equal(
     calls$downloads[["new-device"]]$datetime,
@@ -200,7 +205,7 @@ test_that("GPS update populates an empty table and overlaps existing data", {
   )
   expect_equal(
     calls$downloads[["existing-device"]]$datetime,
-    "2026-07-13T00:00:00Z"
+    "2026-07-18T00:00:00Z"
   )
   expect_equal(calls$downloads[["new-device"]]$what, "gps")
   expect_false(calls$downloads[["new-device"]]$verbose)
@@ -293,17 +298,46 @@ test_that("DRUID update runs the device and GPS layers in order", {
       expect_equal(logstring, "login-token")
       2
     },
-    .druid_update_gps = function(logstring) {
+    .druid_update_gps = function(logstring, verbose) {
       calls$order <- c(calls$order, "gps")
       expect_equal(logstring, "login-token")
+      expect_false(verbose)
       data.table(id = "device", success = TRUE)
     }
   )
 
-  result <- withVisible(DRUID_update())
+  result <- withVisible(DRUID_update(verbose = FALSE))
 
   expect_false(result$visible)
   expect_equal(calls$order, c("devices", "gps"))
   expect_equal(result$value$devices_added, 2)
   expect_true(result$value$gps$success)
+})
+
+
+test_that("DRUID update reports stages when verbose", {
+  local_mocked_bindings(
+    .druid_credentials = function() {
+      list(
+        generic = list(un = "username", pwd = "password"),
+        kw1 = "first-keyword",
+        kw2 = "second-keyword"
+      )
+    },
+    ecotopia_login = function(un, pwd, kw1, kw2, verbose) {
+      "login-token"
+    },
+    .druid_update_device_list = function(logstring) 1,
+    .druid_update_gps = function(logstring, verbose) {
+      expect_true(verbose)
+      data.table()
+    }
+  )
+
+  messages <- capture_messages(
+    DRUID_update(verbose = TRUE)
+  )
+  expect_true(
+    any(grepl("DRUID: authenticating with Ecotopia", messages))
+  )
 })
