@@ -167,11 +167,8 @@ DRUID_update <- function() {
 }
 
 
-.druid_gps_watermarks <- function() {
-  connection <- dbcon(db = "DRUID", server = "scidb")
-  on.exit(DBI::dbDisconnect(connection))
-
-  query <- glue(
+.druid_gps_watermark_query <- function() {
+  glue(
     "
     SELECT
       d.id,
@@ -182,14 +179,22 @@ DRUID_update <- function() {
     FROM device_list AS d
     LEFT JOIN GPS AS g ON g.id = d.id
     GROUP BY d.id
-    ORDER BY last_timestamp IS NOT NULL, last_timestamp
+    ORDER BY
+      MAX(g.timestamp) IS NOT NULL,
+      MAX(g.timestamp)
     "
   ) |>
     as.character()
+}
+
+
+.druid_gps_watermarks <- function() {
+  connection <- dbcon(db = "DRUID", server = "scidb")
+  on.exit(DBI::dbDisconnect(connection))
 
   DBI::dbGetQuery(
     connection,
-    query
+    .druid_gps_watermark_query()
   ) |>
     as.data.table()
 }

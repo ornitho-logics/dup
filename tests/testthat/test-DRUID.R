@@ -80,6 +80,19 @@ test_that("empty GPS input remains empty", {
 })
 
 
+test_that("GPS watermark ordering does not reference an aggregate alias", {
+  query <- .druid_gps_watermark_query()
+
+  expect_match(
+    query,
+    "ORDER BY\\s+MAX\\(g.timestamp\\) IS NOT NULL,\\s+MAX\\(g.timestamp\\)"
+  )
+  expect_false(
+    grepl("last_timestamp IS NOT NULL", query, fixed = TRUE)
+  )
+})
+
+
 test_that("GPS insertion treats existing database keys as no-ops", {
   calls <- new.env(parent = emptyenv())
   calls$disconnected <- FALSE
