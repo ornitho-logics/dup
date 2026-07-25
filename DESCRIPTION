@@ -14,7 +14,7 @@ Imports:
     DBI,
     RMariaDB,
     dbo,
-    apis (>= 0.0.3),
+    apis (>= 0.0.4),
     magrittr,
     stringr,
     forcats,

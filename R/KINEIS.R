@@ -21,6 +21,7 @@
 #'   update summaries by device.
 #' @export
 KINEIS_update <- function(verbose = interactive()) {
+  .kineis_require_streaming_api()
   .kineis_inform(verbose, "KINEIS: authenticating.")
   credentials <- .kineis_credentials()
 
@@ -66,6 +67,29 @@ KINEIS_update <- function(verbose = interactive()) {
     doppler = doppler
   ))
 }
+
+
+.kineis_require_streaming_api <- function() {
+  required_arguments <- c("page_handler", "collect")
+  available_arguments <- names(formals(kineis_data))
+  missing_arguments <- setdiff(
+    required_arguments,
+    available_arguments
+  )
+
+  if (length(missing_arguments) > 0) {
+    stop(
+      paste(
+        "KINEIS_update() requires apis >= 0.0.4.",
+        "Restart R to unload the older apis namespace, then try again."
+      ),
+      call. = FALSE
+    )
+  }
+
+  invisible(TRUE)
+}
+
 
 .kineis_inform <- function(verbose, text) {
   if (verbose) {

@@ -18,6 +18,21 @@ test_that("Kineis credentials default the public API endpoints", {
 })
 
 
+test_that("Kineis update requires the streaming API interface", {
+  local_mocked_bindings(
+    kineis_data = function(token, api_telemetry_url) {
+      NULL
+    }
+  )
+
+  expect_error(
+    .kineis_require_streaming_api(),
+    "requires apis >= 0.0.4",
+    fixed = TRUE
+  )
+})
+
+
 test_that("Kineis credentials fail before HTTP when secrets are missing", {
   expect_error(
     .kineis_credentials(list()),
