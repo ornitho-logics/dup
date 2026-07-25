@@ -280,11 +280,6 @@ KINEIS_update <- function(verbose = interactive()) {
   )
 }
 
-.kineis_sensor_id <- function(x) {
-  id <- stringr::str_extract(x, "[0-9]+$")
-  suppressWarnings(as.integer(id))
-}
-
 .kineis_prepare_sensors <- function(telemetry) {
   telemetry <- data.table::copy(as.data.table(telemetry))
 
@@ -381,17 +376,14 @@ KINEIS_update <- function(verbose = interactive()) {
   }
 
   output <- rbindlist(parts, use.names = TRUE, fill = TRUE)
-  output[, sensor := .kineis_sensor_id(sensor_name)]
-  invalid <- output[is.na(sensor), unique(sensor_name)]
+  output[, sensor := trimws(as.character(sensor_name))]
+  invalid <- output[
+    is.na(sensor) | !nzchar(sensor),
+    unique(sensor_name)
+  ]
 
   if (length(invalid) > 0) {
-    stop(
-      glue(
-        "Kineis sensor names do not end in numeric IDs: ",
-        "{toString(invalid)}"
-      ),
-      call. = FALSE
-    )
+    stop("Kineis sensor payload contains empty names.", call. = FALSE)
   }
 
   output[, let(

@@ -49,8 +49,8 @@ test_that("Kineis sensor preparation supports flattened API fields", {
       "2026-07-01T00:00:00.123Z",
       "2026-07-01T00:01:00.456Z"
     ),
-    sensors.SENSOR1 = c("7.6", NA_character_),
-    sensors.SENSOR2 = c("5.2", "5.1")
+    `sensors.BATTERY VOLTS` = c("7.6", NA_character_),
+    sensors.TEMPERATURE = c("5.2", "5.1")
   )
 
   result <- .kineis_prepare_sensors(telemetry)
@@ -60,7 +60,10 @@ test_that("Kineis sensor preparation supports flattened API fields", {
     c("deviceUid", "msgDatetime", "sensor", "value")
   )
   expect_equal(result$deviceUid, rep("123", 3))
-  expect_equal(result$sensor, c(1L, 2L, 2L))
+  expect_equal(
+    result$sensor,
+    c("BATTERY VOLTS", "TEMPERATURE", "TEMPERATURE")
+  )
   expect_equal(result$value, c("7.6", "5.2", "5.1"))
   expect_equal(
     result$msgDatetime,
@@ -82,7 +85,7 @@ test_that("Kineis sensor preparation supports legacy JSON fragments", {
 
   result <- .kineis_prepare_sensors(telemetry)
 
-  expect_equal(result$sensor, c(1L, 32L))
+  expect_equal(result$sensor, c("SENSOR1", "SENSOR32"))
   expect_equal(result$value, c("7.6", "5.2"))
 })
 
@@ -163,7 +166,7 @@ test_that("Kineis sensor insertion stages data and ignores stored keys", {
   sensors <- data.table(
     deviceUid = "123",
     msgDatetime = "2026-07-01 00:00:00.123000",
-    sensor = 1L,
+    sensor = "TEMPERATURE",
     value = "7.6"
   )
 
