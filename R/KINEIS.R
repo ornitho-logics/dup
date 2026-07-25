@@ -1,34 +1,54 @@
-#' Run the Kineis database update
+#' Backfill the Kineis database from the bulk API
 #'
-#' Logs in using the `kineis_api` configuration, retrieves the devices
-#' available to that profile, and updates the MariaDB `sensors` and `doppler`
-#' tables. Sensors and Doppler locations are requested together and written
-#' from the same chronologically ordered API pages.
+#' Logs in using the `kineis_api` configuration and backfills the MariaDB
+#' `sensors` and `doppler` tables. Each request covers all devices available to
+#' the login profile. Sensors and Doppler locations are requested together and
+#' written from the same chronologically ordered API pages.
 #'
-#' Devices without a shared telemetry checkpoint are downloaded from
-#' 2000-01-01. Existing devices are resumed two days before their checkpoint,
-#' and rows whose database key is already present are left unchanged. Each page
-#' and its checkpoint are committed together, so an interrupted initial
-#' backfill resumes from the latest persisted page.
+#' Historical time is divided into bounded windows. The bulk-count endpoint is
+#' used to shrink dense windows before downloading them. The active window and
+#' its pagination cursor are stored in MariaDB. Each page and its next cursor
+#' are committed together, so an interrupted backfill resumes at the next page
+#' instead of repeating a timestamp overlap. Rows whose database key is already
+#' present are left unchanged.
+#'
 #' Authentication tokens are renewed before expiry and after an unexpected
-#' HTTP 401 response. If HTTP 429 rate limiting is encountered (after automatic
-#' retries where configured), the update returns normally with a deferred
-#' status. The next scheduled run resumes from the latest persisted page.
+#' HTTP 401 response. If the API remains rate limited or temporarily
+#' unavailable after automatic retries, the update returns normally with a
+#' deferred status. The next scheduled run resumes the same window and cursor.
 #'
 #' The public Kinéis authentication and telemetry endpoints are used when
 #' `auth_url` or `api_telemetry_url` is absent from the configuration. The
 #' `kineis_api` configuration must provide non-empty `un` and `pwd` values.
 #'
-#' @param verbose Show stage and per-device progress. Defaults to
-#'   [interactive()].
+#' @param verbose Show stage and window progress. Defaults to [interactive()].
+#' @param initial_datetime Initial historical boundary in UTC. It is used only
+#'   when the bulk progress table has no checkpoint.
+#' @param max_window_days Maximum number of days in a bulk-count window.
+#' @param min_window_hours Smallest window allowed when a dense interval is
+#'   repeatedly halved.
+#' @param target_messages Windows larger than this message count are halved
+#'   before retrieval, unless the minimum window size has been reached.
 #'
 #' @return Invisibly, a list containing `status`, `deferred`,
-#'   `deferred_stage`, the device count, and a combined telemetry update summary
-#'   by device. `status` is `"complete"` or `"deferred"`.
+#'   `deferred_stage`, and a bulk-window summary. `status` is `"complete"` or
+#'   `"deferred"`.
 #' @export
-KINEIS_update <- function(verbose = interactive()) {
-  .kineis_require_streaming_api()
-  .kineis_inform(verbose, "KINEIS: authenticating.")
+KINEIS_update_bulk <- function(
+  verbose = interactive(),
+  initial_datetime = "2000-01-01T00:00:00.000Z",
+  max_window_days = 365,
+  min_window_hours = 24,
+  target_messages = 1000
+) {
+  .kineis_require_bulk_api()
+  .kineis_validate_bulk_settings(
+    initial_datetime,
+    max_window_days,
+    min_window_hours,
+    target_messages
+  )
+  .kineis_inform(verbose, "KINEIS BULK: authenticating.")
   credentials <- .kineis_credentials()
 
   token <- .kineis_token_provider(credentials)
@@ -42,60 +62,38 @@ KINEIS_update <- function(verbose = interactive()) {
 
   if (inherits(authentication, "httr2_http_429")) {
     return(invisible(.kineis_deferred_update(
-      stage = "authentication",
+      stage = "bulk authentication",
       error = conditionMessage(authentication)
     )))
   }
 
-  .kineis_inform(verbose, "KINEIS: retrieving the device list.")
-  devices <- tryCatch(
-    kineis_devlist(
-      token,
-      api_telemetry_url = credentials$api_telemetry_url,
-      verbose = FALSE
-    ) |>
-      .kineis_prepare_devices(),
-    httr2_http_429 = identity
-  )
-
-  if (inherits(devices, "httr2_http_429")) {
-    return(invisible(.kineis_deferred_update(
-      stage = "device list",
-      error = conditionMessage(devices)
-    )))
-  }
-
-  .kineis_inform(
-    verbose,
-    glue("KINEIS: device list complete; {nrow(devices)} device(s).")
-  )
-
-  end_datetime <- .kineis_current_datetime()
-  telemetry <- .kineis_update_telemetry(
+  target_datetime <- .kineis_current_datetime()
+  windows <- .kineis_update_bulk(
     token,
     api_telemetry_url = credentials$api_telemetry_url,
-    devices = devices,
-    end_datetime = end_datetime,
+    target_datetime = target_datetime,
+    initial_datetime = initial_datetime,
+    max_window_days = max_window_days,
+    min_window_hours = min_window_hours,
+    target_messages = target_messages,
     verbose = verbose
   )
 
-  if (.kineis_was_deferred(telemetry)) {
+  if (.kineis_was_deferred(windows)) {
     return(invisible(.kineis_deferred_update(
-      stage = "telemetry",
-      devices = nrow(devices),
-      telemetry = telemetry,
-      error = .kineis_deferred_error(telemetry)
+      stage = "bulk telemetry",
+      windows = windows,
+      error = .kineis_deferred_error(windows)
     )))
   }
 
-  .kineis_inform(verbose, "KINEIS: update complete.")
+  .kineis_inform(verbose, "KINEIS BULK: backfill complete.")
 
   invisible(list(
     status = "complete",
     deferred = FALSE,
     deferred_stage = NA_character_,
-    devices = nrow(devices),
-    telemetry = telemetry,
+    windows = windows,
     error = NA_character_
   ))
 }
@@ -115,15 +113,14 @@ KINEIS_update <- function(verbose = interactive()) {
 
 .kineis_deferred_update <- function(
   stage,
-  devices = NA_integer_,
-  telemetry = data.table(),
+  windows = data.table(),
   error = NA_character_
 ) {
   message(
     glue(
-      "KINEIS: API rate limiting is active during {stage}; update deferred. ",
-      "The next scheduled run will resume ",
-      "from the latest persisted page."
+      "KINEIS: API access is temporarily unavailable during {stage}; ",
+      "update deferred. The next scheduled run will resume the persisted ",
+      "bulk window and cursor."
     )
   )
 
@@ -131,29 +128,70 @@ KINEIS_update <- function(verbose = interactive()) {
     status = "deferred",
     deferred = TRUE,
     deferred_stage = stage,
-    devices = devices,
-    telemetry = telemetry,
+    windows = windows,
     error = error
   )
 }
 
 
-.kineis_require_streaming_api <- function() {
-  required_arguments <- c("page_handler", "collect")
+.kineis_require_bulk_api <- function() {
+  required_arguments <- c("page_handler", "collect", "after_cursor")
   available_arguments <- names(formals(kineis_data))
   missing_arguments <- setdiff(
     required_arguments,
     available_arguments
   )
 
-  if (length(missing_arguments) > 0) {
+  if (
+    length(missing_arguments) > 0 ||
+      !exists("kineis_data_count", mode = "function")
+  ) {
     stop(
       paste(
-        "KINEIS_update() requires apis >= 0.0.5.",
+        "KINEIS_update_bulk() requires apis >= 0.0.6.",
         "Restart R to unload the older apis namespace, then try again."
       ),
       call. = FALSE
     )
+  }
+
+  invisible(TRUE)
+}
+
+
+.kineis_validate_bulk_settings <- function(
+  initial_datetime,
+  max_window_days,
+  min_window_hours,
+  target_messages
+) {
+  initial <- ymd_hms(initial_datetime, tz = "UTC", quiet = TRUE)
+
+  if (length(initial) != 1 || is.na(initial)) {
+    stop("`initial_datetime` must be one valid UTC datetime.", call. = FALSE)
+  }
+
+  positive_scalar <- function(x) {
+    is.numeric(x) &&
+      length(x) == 1 &&
+      !is.na(x) &&
+      is.finite(x) &&
+      x > 0
+  }
+
+  if (!positive_scalar(max_window_days)) {
+    stop("`max_window_days` must be one positive number.", call. = FALSE)
+  }
+
+  if (!positive_scalar(min_window_hours)) {
+    stop("`min_window_hours` must be one positive number.", call. = FALSE)
+  }
+
+  if (
+    !positive_scalar(target_messages) ||
+      target_messages != floor(target_messages)
+  ) {
+    stop("`target_messages` must be one positive integer.", call. = FALSE)
   }
 
   invisible(TRUE)
@@ -283,35 +321,6 @@ KINEIS_update <- function(verbose = interactive()) {
     )
 }
 
-.kineis_prepare_devices <- function(devices) {
-  devices <- data.table::copy(as.data.table(devices))
-  required <- c("deviceUid", "deviceRef")
-  missing_columns <- setdiff(required, names(devices))
-
-  if (length(missing_columns) > 0) {
-    stop(
-      glue(
-        "Kineis device list is missing columns: ",
-        "{toString(missing_columns)}"
-      ),
-      call. = FALSE
-    )
-  }
-
-  devices <- devices[, .(
-    deviceUid = as.character(deviceUid),
-    deviceRef = as.character(deviceRef)
-  )]
-  devices <- devices[
-    !is.na(deviceUid) &
-      nzchar(deviceUid) &
-      !is.na(deviceRef) &
-      nzchar(deviceRef)
-  ]
-
-  unique(devices, by = c("deviceUid", "deviceRef"))
-}
-
 .kineis_field <- function(x, name) {
   if (name %in% names(x)) {
     x[[name]]
@@ -329,30 +338,20 @@ KINEIS_update <- function(verbose = interactive()) {
   )
 }
 
-.kineis_from_datetime <- function(
-  last_timestamp,
-  overlap,
-  initial_datetime
-) {
-  if (
-    length(last_timestamp) == 0 ||
-      is.na(last_timestamp) ||
-      !nzchar(last_timestamp)
-  ) {
-    return(initial_datetime)
+
+.kineis_rfc3339 <- function(x) {
+  if (inherits(x, "POSIXt")) {
+    time <- lubridate::with_tz(x, "UTC")
+  } else {
+    time <- ymd_hms(x, tz = "UTC", quiet = TRUE)
   }
 
-  last_time <- ymd_hms(last_timestamp, tz = "UTC", quiet = TRUE)
-
-  if (is.na(last_time)) {
-    stop(
-      glue("Invalid Kineis database timestamp: {last_timestamp}"),
-      call. = FALSE
-    )
+  if (length(time) != 1 || is.na(time)) {
+    stop("Invalid Kineis UTC datetime.", call. = FALSE)
   }
 
   format(
-    last_time - overlap,
+    time,
     format = "%Y-%m-%dT%H:%M:%OS3Z",
     tz = "UTC"
   )
@@ -564,48 +563,81 @@ KINEIS_update <- function(verbose = interactive()) {
   unique(output, by = c("deviceUid", "msgDatetime"))
 }
 
-.kineis_progress_query <- function() {
+.kineis_bulk_progress_ddl <- function() {
   "
-  SELECT
-    deviceUid,
-    DATE_FORMAT(
-      lastMsgDatetime,
-      '%Y-%m-%dT%H:%i:%s.%fZ'
-    ) AS last_timestamp
-  FROM telemetry_progress
+  CREATE TABLE IF NOT EXISTS bulk_progress (
+    pipeline varchar(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    windowStart datetime(6) NOT NULL,
+    windowEnd datetime(6) NOT NULL,
+    afterCursor varchar(255) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+    messageCount bigint unsigned DEFAULT NULL,
+    updatedAt timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+      ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (pipeline)
+  )
+  ENGINE = InnoDB
+  DEFAULT CHARACTER SET = utf8mb4
+  COLLATE = utf8mb4_unicode_ci
+  COMMENT = 'Resumable account-wide Kineis bulk retrieval windows'
   "
 }
 
-.kineis_watermarks <- function(devices) {
-  devices <- data.table::copy(as.data.table(devices))
+
+.kineis_ensure_bulk_progress <- function(connection) {
+  DBI::dbExecute(connection, .kineis_bulk_progress_ddl())
+}
+
+
+.kineis_bulk_progress_query <- function() {
+  "
+  SELECT
+    DATE_FORMAT(
+      windowStart,
+      '%Y-%m-%dT%H:%i:%s.%fZ'
+    ) AS window_start,
+    DATE_FORMAT(
+      windowEnd,
+      '%Y-%m-%dT%H:%i:%s.%fZ'
+    ) AS window_end,
+    afterCursor AS after_cursor,
+    messageCount AS message_count
+  FROM bulk_progress
+  WHERE pipeline = 'telemetry'
+  "
+}
+
+
+.kineis_bulk_progress <- function(initial_datetime) {
   connection <- dbcon(db = "KINEIS", server = "scidb")
   on.exit(DBI::dbDisconnect(connection))
+  .kineis_ensure_bulk_progress(connection)
 
   stored <- DBI::dbGetQuery(
     connection,
-    .kineis_progress_query()
+    .kineis_bulk_progress_query()
   ) |>
     as.data.table()
 
-  devices[, last_timestamp := NA_character_]
+  if (nrow(stored) == 0) {
+    initial <- .kineis_rfc3339(initial_datetime)
 
-  if (nrow(stored) > 0) {
-    stored[, deviceUid := as.character(deviceUid)]
-    devices[
-      stored,
-      on = "deviceUid",
-      last_timestamp := i.last_timestamp
-    ]
+    return(list(
+      window_start = initial,
+      window_end = initial,
+      after_cursor = NULL,
+      message_count = NULL
+    ))
   }
 
-  devices[, has_data := !is.na(last_timestamp)]
-  data.table::setorderv(
-    devices,
-    c("has_data", "last_timestamp"),
-    c(1, 1)
+  cursor <- stored$after_cursor[1]
+  count <- suppressWarnings(as.numeric(stored$message_count[1]))
+
+  list(
+    window_start = .kineis_rfc3339(stored$window_start[1]),
+    window_end = .kineis_rfc3339(stored$window_end[1]),
+    after_cursor = if (is.na(cursor) || !nzchar(cursor)) NULL else cursor,
+    message_count = if (is.na(count)) NULL else count
   )
-  devices[, has_data := NULL]
-  devices
 }
 
 .kineis_insert_sensors <- function(sensors, connection = NULL) {
@@ -700,10 +732,11 @@ KINEIS_update <- function(verbose = interactive()) {
   DBI::dbExecute(connection, statement)
 }
 
-.kineis_set_progress <- function(
-  device_uid,
-  device_ref,
-  timestamp,
+.kineis_set_bulk_progress <- function(
+  window_start,
+  window_end,
+  after_cursor = NULL,
+  message_count = NULL,
   connection = NULL
 ) {
   own_connection <- is.null(connection)
@@ -711,61 +744,74 @@ KINEIS_update <- function(verbose = interactive()) {
   if (own_connection) {
     connection <- dbcon(db = "KINEIS", server = "scidb")
     on.exit(DBI::dbDisconnect(connection))
+    .kineis_ensure_bulk_progress(connection)
   }
 
   statement <- "
-    INSERT INTO telemetry_progress (
-      deviceUid,
-      deviceRef,
-      lastMsgDatetime
+    INSERT INTO bulk_progress (
+      pipeline,
+      windowStart,
+      windowEnd,
+      afterCursor,
+      messageCount
     )
-    VALUES (?, ?, ?)
+    VALUES ('telemetry', ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
-      deviceRef = VALUES(deviceRef),
-      lastMsgDatetime = GREATEST(
-        lastMsgDatetime,
-        VALUES(lastMsgDatetime)
-      )
+      windowStart = VALUES(windowStart),
+      windowEnd = VALUES(windowEnd),
+      afterCursor = VALUES(afterCursor),
+      messageCount = VALUES(messageCount)
   "
 
   DBI::dbExecute(
     connection,
     statement,
     params = list(
-      as.character(device_uid),
-      as.character(device_ref),
-      .kineis_api_sql_time(timestamp)
+      .kineis_api_sql_time(window_start),
+      .kineis_api_sql_time(window_end),
+      if (is.null(after_cursor)) NA_character_ else as.character(after_cursor),
+      if (is.null(message_count)) NA_real_ else as.numeric(message_count)
     )
   )
 }
 
-.kineis_page_checkpoint <- function(telemetry) {
-  if (!"msgDatetime" %in% names(telemetry)) {
+
+.kineis_page_progress <- function(page_info) {
+  if (is.null(page_info) || !isTRUE(page_info$hasNextPage)) {
+    return(list(complete = TRUE, after_cursor = NULL))
+  }
+
+  cursor <- page_info$endCursor
+
+  if (
+    is.null(cursor) ||
+      length(cursor) != 1 ||
+      is.na(cursor) ||
+      !nzchar(cursor)
+  ) {
     stop(
-      "Kineis telemetry page is missing `msgDatetime`.",
+      "Kineis page indicated another page but returned no cursor.",
       call. = FALSE
     )
   }
 
-  timestamps <- .kineis_api_sql_time(telemetry[["msgDatetime"]])
-  timestamps <- timestamps[!is.na(timestamps)]
-
-  if (length(timestamps) == 0) {
-    stop(
-      "Kineis telemetry page has no valid message timestamp.",
-      call. = FALSE
-    )
-  }
-
-  max(timestamps)
+  list(complete = FALSE, after_cursor = as.character(cursor))
 }
 
-.kineis_persist_page <- function(telemetry, device_uid, device_ref) {
+
+.kineis_persist_bulk_page <- function(
+  telemetry,
+  window_start,
+  window_end,
+  page_info,
+  message_count
+) {
   sensors <- .kineis_prepare_sensors(telemetry)
   doppler <- .kineis_prepare_doppler(telemetry)
-  checkpoint <- .kineis_page_checkpoint(telemetry)
+  progress <- .kineis_page_progress(page_info)
   connection <- dbcon(db = "KINEIS", server = "scidb")
   on.exit(DBI::dbDisconnect(connection))
+  .kineis_ensure_bulk_progress(connection)
 
   affected <- DBI::dbWithTransaction(connection, {
     sensor_affected <- .kineis_insert_sensors(
@@ -776,58 +822,294 @@ KINEIS_update <- function(verbose = interactive()) {
       doppler,
       connection = connection
     )
-    .kineis_set_progress(
-      device_uid,
-      device_ref,
-      checkpoint,
-      connection = connection
-    )
+
+    if (progress$complete) {
+      .kineis_set_bulk_progress(
+        window_start = window_end,
+        window_end = window_end,
+        connection = connection
+      )
+    } else {
+      .kineis_set_bulk_progress(
+        window_start = window_start,
+        window_end = window_end,
+        after_cursor = progress$after_cursor,
+        message_count = message_count,
+        connection = connection
+      )
+    }
 
     list(
       sensor_rows = nrow(sensors),
       sensor_affected = sensor_affected,
       doppler_rows = nrow(doppler),
-      doppler_affected = doppler_affected
+      doppler_affected = doppler_affected,
+      after_cursor = progress$after_cursor,
+      complete = progress$complete
     )
   })
 
   affected
 }
 
-.kineis_update_telemetry <- function(
+
+.kineis_time <- function(x) {
+  if (inherits(x, "POSIXt")) {
+    return(lubridate::with_tz(x, "UTC"))
+  }
+
+  time <- ymd_hms(x, tz = "UTC", quiet = TRUE)
+
+  if (length(time) != 1 || is.na(time)) {
+    stop("Invalid Kineis UTC datetime.", call. = FALSE)
+  }
+
+  time
+}
+
+
+.kineis_window_end <- function(start, target, max_window_days) {
+  start <- .kineis_time(start)
+  target <- .kineis_time(target)
+  candidate <- start + lubridate::days(max_window_days)
+
+  .kineis_rfc3339(min(candidate, target))
+}
+
+
+.kineis_shrunk_window_end <- function(
+  start,
+  end,
+  min_window_hours
+) {
+  start <- .kineis_time(start)
+  end <- .kineis_time(end)
+  duration <- as.numeric(difftime(end, start, units = "secs"))
+  minimum <- min_window_hours * 60 * 60
+
+  if (duration <= minimum) {
+    return(NULL)
+  }
+
+  .kineis_rfc3339(start + max(duration / 2, minimum))
+}
+
+
+.kineis_is_temporary_api_error <- function(error) {
+  any(vapply(
+    c("httr2_http_429", "httr2_http_503", "httr2_http_504"),
+    function(class) inherits(error, class),
+    logical(1)
+  ))
+}
+
+
+.kineis_bulk_result <- function(
+  window_start,
+  window_end,
+  expected,
+  downloaded = 0L,
+  sensor_rows = 0L,
+  sensor_affected = 0L,
+  doppler_rows = 0L,
+  doppler_affected = 0L,
+  success,
+  deferred,
+  error = NA_character_
+) {
+  data.table(
+    window_start = window_start,
+    window_end = window_end,
+    expected = if (is.null(expected)) NA_real_ else as.numeric(expected),
+    downloaded = as.integer(downloaded),
+    sensor_rows = as.integer(sensor_rows),
+    sensor_affected = as.integer(sensor_affected),
+    doppler_rows = as.integer(doppler_rows),
+    doppler_affected = as.integer(doppler_affected),
+    success = success,
+    deferred = deferred,
+    error = error
+  )
+}
+
+
+.kineis_update_bulk <- function(
   token,
   api_telemetry_url,
-  devices,
-  end_datetime,
-  overlap = lubridate::days(2),
-  initial_datetime = "2000-01-01T00:00:00.000Z",
+  target_datetime,
+  initial_datetime,
+  max_window_days,
+  min_window_hours,
+  target_messages,
   verbose = interactive()
 ) {
-  watermarks <- .kineis_watermarks(devices)
-  total_devices <- nrow(watermarks)
+  state <- .kineis_bulk_progress(initial_datetime)
+  target_datetime <- .kineis_rfc3339(target_datetime)
+  results <- list()
 
-  .kineis_inform(
-    verbose,
-    glue("TELEMETRY: {total_devices} device(s) to update.")
-  )
-
-  results <- vector("list", total_devices)
-  result_count <- 0L
-
-  for (i in seq_len(total_devices)) {
-    device_uid <- watermarks$deviceUid[i]
-    device_ref <- watermarks$deviceRef[i]
-    from <- .kineis_from_datetime(
-      watermarks$last_timestamp[i],
-      overlap = overlap,
-      initial_datetime = initial_datetime
+  if (.kineis_time(state$window_start) > .kineis_time(target_datetime)) {
+    stop(
+      "Kineis bulk checkpoint is later than the update target.",
+      call. = FALSE
     )
+  }
+
+  while (.kineis_time(state$window_start) < .kineis_time(target_datetime)) {
+    if (
+      .kineis_time(state$window_start) >=
+        .kineis_time(state$window_end)
+    ) {
+      state$window_end <- .kineis_window_end(
+        state$window_start,
+        target_datetime,
+        max_window_days
+      )
+      state$after_cursor <- NULL
+      state$message_count <- NULL
+      .kineis_set_bulk_progress(
+        state$window_start,
+        state$window_end
+      )
+    }
 
     .kineis_inform(
       verbose,
       glue(
-        "TELEMETRY [{i}/{total_devices}] {device_ref}: ",
-        "downloading from {from}."
+        "KINEIS BULK [{state$window_start} \u2192 {state$window_end}]: ",
+        if (is.null(state$after_cursor)) {
+          "sizing window."
+        } else {
+          glue("resuming after cursor {state$after_cursor}.")
+        }
+      )
+    )
+
+    if (
+      is.null(state$after_cursor) &&
+        is.null(state$message_count)
+    ) {
+      count <- tryCatch(
+        kineis_data_count(
+          token,
+          api_telemetry_url = api_telemetry_url,
+          datetime = state$window_start,
+          end_datetime = state$window_end,
+          verbose = FALSE
+        ),
+        error = identity
+      )
+
+      if (inherits(count, "error")) {
+        if (inherits(count, "httr2_http_504")) {
+          smaller_end <- .kineis_shrunk_window_end(
+            state$window_start,
+            state$window_end,
+            min_window_hours
+          )
+
+          if (!is.null(smaller_end)) {
+            state$window_end <- smaller_end
+            .kineis_set_bulk_progress(
+              state$window_start,
+              state$window_end
+            )
+            .kineis_inform(
+              verbose,
+              glue(
+                "KINEIS BULK: count timed out; window reduced to end at ",
+                "{state$window_end}."
+              )
+            )
+            next
+          }
+        }
+
+        if (.kineis_is_temporary_api_error(count)) {
+          results[[length(results) + 1]] <- .kineis_bulk_result(
+            state$window_start,
+            state$window_end,
+            expected = NULL,
+            success = FALSE,
+            deferred = TRUE,
+            error = conditionMessage(count)
+          )
+          break
+        }
+
+        stop(count)
+      }
+
+      state$message_count <- count
+
+      if (count == 0) {
+        .kineis_set_bulk_progress(
+          state$window_end,
+          state$window_end
+        )
+        .kineis_inform(
+          verbose,
+          glue(
+            "KINEIS BULK [{state$window_start} \u2192 {state$window_end}]: ",
+            "empty; window complete."
+          )
+        )
+        results[[length(results) + 1]] <- .kineis_bulk_result(
+          state$window_start,
+          state$window_end,
+          expected = 0,
+          success = TRUE,
+          deferred = FALSE
+        )
+        state$window_start <- state$window_end
+        state$message_count <- NULL
+        next
+      }
+
+      smaller_end <- if (count > target_messages) {
+        .kineis_shrunk_window_end(
+          state$window_start,
+          state$window_end,
+          min_window_hours
+        )
+      } else {
+        NULL
+      }
+
+      if (!is.null(smaller_end)) {
+        .kineis_inform(
+          verbose,
+          glue(
+            "KINEIS BULK: {format(count, scientific = FALSE)} messages ",
+            "exceed the {target_messages} target; window reduced to end at ",
+            "{smaller_end}."
+          )
+        )
+        state$window_end <- smaller_end
+        state$message_count <- NULL
+        .kineis_set_bulk_progress(
+          state$window_start,
+          state$window_end
+        )
+        next
+      }
+
+      .kineis_set_bulk_progress(
+        state$window_start,
+        state$window_end,
+        message_count = state$message_count
+      )
+    }
+
+    .kineis_inform(
+      verbose,
+      glue(
+        "KINEIS BULK [{state$window_start} \u2192 {state$window_end}]: ",
+        "downloading ",
+        if (is.null(state$message_count)) {
+          "remaining messages."
+        } else {
+          glue("{format(state$message_count, scientific = FALSE)} messages.")
+        }
       )
     )
 
@@ -837,11 +1119,13 @@ KINEIS_update <- function(verbose = interactive()) {
     doppler_rows <- 0L
     doppler_affected <- 0L
 
-    persist_page <- function(downloaded) {
-      persisted <- .kineis_persist_page(
+    persist_page <- function(downloaded, page_info) {
+      persisted <- .kineis_persist_bulk_page(
         downloaded,
-        device_uid = device_uid,
-        device_ref = device_ref
+        window_start = state$window_start,
+        window_end = state$window_end,
+        page_info = page_info,
+        message_count = state$message_count
       )
       downloaded_count <<- downloaded_count + nrow(downloaded)
       sensor_rows <<- sensor_rows + persisted$sensor_rows
@@ -852,7 +1136,7 @@ KINEIS_update <- function(verbose = interactive()) {
       .kineis_inform(
         verbose,
         glue(
-          "TELEMETRY [{i}/{total_devices}] {device_ref}: ",
+          "KINEIS BULK [{state$window_start} \u2192 {state$window_end}]: ",
           "{downloaded_count} downloaded, ",
           "{sensor_rows} sensor and {doppler_rows} Doppler rows prepared."
         )
@@ -861,14 +1145,14 @@ KINEIS_update <- function(verbose = interactive()) {
       invisible(NULL)
     }
 
-    result <- tryCatch(
+    retrieval <- tryCatch(
       {
         kineis_data(
           token,
           api_telemetry_url = api_telemetry_url,
-          datetime = from,
-          end_datetime = end_datetime,
-          device_refs = device_ref,
+          datetime = state$window_start,
+          end_datetime = state$window_end,
+          device_refs = character(),
           retrieve_metadata = FALSE,
           retrieve_raw_data = FALSE,
           retrieve_doppler = TRUE,
@@ -877,28 +1161,26 @@ KINEIS_update <- function(verbose = interactive()) {
           retrieve_additional_properties = FALSE,
           verbose = FALSE,
           page_handler = persist_page,
-          collect = FALSE
+          collect = FALSE,
+          after_cursor = state$after_cursor
         )
 
-        .kineis_set_progress(
-          device_uid,
-          device_ref,
-          end_datetime
+        .kineis_set_bulk_progress(
+          state$window_end,
+          state$window_end
         )
 
-        data.table(
-          deviceUid = device_uid,
-          deviceRef = device_ref,
-          from = from,
-          to = end_datetime,
+        .kineis_bulk_result(
+          state$window_start,
+          state$window_end,
+          expected = state$message_count,
           downloaded = downloaded_count,
           sensor_rows = sensor_rows,
           sensor_affected = sensor_affected,
           doppler_rows = doppler_rows,
           doppler_affected = doppler_affected,
           success = TRUE,
-          deferred = FALSE,
-          error = NA_character_
+          deferred = FALSE
         )
       },
       error = function(e) {
@@ -912,12 +1194,11 @@ KINEIS_update <- function(verbose = interactive()) {
           )
         }
 
-        if (inherits(e, "httr2_http_429")) {
-          return(data.table(
-            deviceUid = device_uid,
-            deviceRef = device_ref,
-            from = from,
-            to = end_datetime,
+        if (.kineis_is_temporary_api_error(e)) {
+          return(.kineis_bulk_result(
+            state$window_start,
+            state$window_end,
+            expected = state$message_count,
             downloaded = downloaded_count,
             sensor_rows = sensor_rows,
             sensor_affected = sensor_affected,
@@ -929,81 +1210,41 @@ KINEIS_update <- function(verbose = interactive()) {
           ))
         }
 
-        data.table(
-          deviceUid = device_uid,
-          deviceRef = device_ref,
-          from = from,
-          to = end_datetime,
-          downloaded = downloaded_count,
-          sensor_rows = sensor_rows,
-          sensor_affected = sensor_affected,
-          doppler_rows = doppler_rows,
-          doppler_affected = doppler_affected,
-          success = FALSE,
-          deferred = FALSE,
-          error = conditionMessage(e)
-        )
+        stop(e)
       }
     )
 
-    if (result$success) {
-      .kineis_inform(
-        verbose,
-        glue(
-          "TELEMETRY [{i}/{total_devices}] {device_ref}: ",
-          "{result$downloaded} downloaded, ",
-          "{result$sensor_affected} sensor and ",
-          "{result$doppler_affected} Doppler rows affected."
-        )
-      )
-    } else if (result$deferred) {
-      .kineis_inform(
-        verbose,
-        glue(
-          "TELEMETRY [{i}/{total_devices}] {device_ref}: ",
-          "rate limited after {result$downloaded} downloaded and ",
-          "{result$sensor_rows} sensor/{result$doppler_rows} Doppler rows ",
-          "prepared; deferring remaining requests."
-        )
-      )
-    } else {
-      .kineis_inform(
-        verbose,
-        glue(
-          "TELEMETRY [{i}/{total_devices}] {device_ref}: ",
-          "failed: {result$error}"
-        )
-      )
-    }
+    results[[length(results) + 1]] <- retrieval
 
-    result_count <- result_count + 1L
-    results[[result_count]] <- result
-
-    if (result$deferred) {
+    if (retrieval$deferred) {
+      .kineis_inform(
+        verbose,
+        glue(
+          "KINEIS BULK [{state$window_start} \u2192 {state$window_end}]: ",
+          "temporarily unavailable after {downloaded_count} downloaded; ",
+          "deferring remaining pages."
+        )
+      )
       break
     }
+
+    .kineis_inform(
+      verbose,
+      glue(
+        "KINEIS BULK [{state$window_start} \u2192 {state$window_end}]: ",
+        "{downloaded_count} downloaded, ",
+        "{sensor_affected} sensor and {doppler_affected} Doppler rows ",
+        "affected; window complete."
+      )
+    )
+    state$window_start <- state$window_end
+    state$after_cursor <- NULL
+    state$message_count <- NULL
   }
 
-  if (result_count == 0L) {
+  if (length(results) == 0) {
     return(data.table())
   }
 
-  results <- results[seq_len(result_count)]
-  result <- rbindlist(results, use.names = TRUE, fill = TRUE)
-  failed <- result[
-    result[["success"]] == FALSE &
-      result[["deferred"]] == FALSE
-  ]
-
-  if (nrow(failed) > 0) {
-    warning(
-      glue(
-        "TELEMETRY update failed for {nrow(failed)} device(s): ",
-        "{toString(failed$deviceRef)}"
-      ),
-      call. = FALSE
-    )
-  }
-
-  result
+  rbindlist(results, use.names = TRUE, fill = TRUE)
 }

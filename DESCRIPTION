@@ -1,5 +1,5 @@
 Package: dup
-Version: 0.4.4
+Version: 0.4.5
 Authors@R: 
     person("Mihai", "Valcu", ,"mihai.valcu@bi.mpg.de", c("aut", "cre"))
 Title: Database Unattended Pipelines 
@@ -14,7 +14,7 @@ Imports:
     DBI,
     RMariaDB,
     dbo,
-    apis (>= 0.0.5),
+    apis (>= 0.0.6),
     magrittr,
     stringr,
     forcats,

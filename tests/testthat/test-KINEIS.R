@@ -35,16 +35,17 @@ test_that("Kineis credentials default the public API endpoints", {
 })
 
 
-test_that("Kineis update requires the streaming API interface", {
+test_that("Kineis bulk update requires the resumable API interface", {
   local_mocked_bindings(
     kineis_data = function(token, api_telemetry_url) {
       NULL
-    }
+    },
+    kineis_data_count = function(...) 0
   )
 
   expect_error(
-    .kineis_require_streaming_api(),
-    "requires apis >= 0.0.5",
+    .kineis_require_bulk_api(),
+    "requires apis >= 0.0.6",
     fixed = TRUE
   )
 })
@@ -309,12 +310,13 @@ test_that("Kineis Doppler insertion stages data and ignores stored keys", {
 })
 
 
-test_that("Kineis page persistence writes both outputs and its checkpoint", {
+test_that("Kineis bulk page persistence writes both outputs and its cursor", {
   calls <- new.env(parent = emptyenv())
   connection <- structure(list(), class = "test_connection")
 
   local_mocked_bindings(
     dbcon = function(db, server) connection,
+    .kineis_ensure_bulk_progress = function(connection) TRUE,
     .kineis_insert_sensors = function(sensors, connection) {
       calls$sensors <- sensors
       nrow(sensors)
@@ -323,16 +325,18 @@ test_that("Kineis page persistence writes both outputs and its checkpoint", {
       calls$doppler <- doppler
       nrow(doppler)
     },
-    .kineis_set_progress = function(
-      device_uid,
-      device_ref,
-      timestamp,
+    .kineis_set_bulk_progress = function(
+      window_start,
+      window_end,
+      after_cursor = NULL,
+      message_count = NULL,
       connection
     ) {
       calls$progress <- list(
-        device_uid = device_uid,
-        device_ref = device_ref,
-        timestamp = timestamp,
+        window_start = window_start,
+        window_end = window_end,
+        after_cursor = after_cursor,
+        message_count = message_count,
         connection = connection
       )
       1
@@ -364,7 +368,13 @@ test_that("Kineis page persistence writes both outputs and its checkpoint", {
     dopplerLocClass = c("A", NA_character_)
   )
 
-  result <- .kineis_persist_page(page, "123", "device-a")
+  result <- .kineis_persist_bulk_page(
+    page,
+    window_start = "2026-07-01T00:00:00.000Z",
+    window_end = "2026-07-02T00:00:00.000Z",
+    page_info = list(hasNextPage = TRUE, endCursor = "99"),
+    message_count = 200
+  )
 
   expect_equal(result$sensor_rows, 2L)
   expect_equal(result$sensor_affected, 2L)
@@ -372,17 +382,22 @@ test_that("Kineis page persistence writes both outputs and its checkpoint", {
   expect_equal(result$doppler_affected, 1L)
   expect_equal(nrow(calls$sensors), 2L)
   expect_equal(nrow(calls$doppler), 1L)
-  expect_equal(calls$progress$device_uid, "123")
-  expect_equal(calls$progress$device_ref, "device-a")
   expect_equal(
-    calls$progress$timestamp,
-    "2026-07-01 00:01:00.456000"
+    calls$progress$window_start,
+    "2026-07-01T00:00:00.000Z"
   )
+  expect_equal(
+    calls$progress$window_end,
+    "2026-07-02T00:00:00.000Z"
+  )
+  expect_equal(calls$progress$after_cursor, "99")
+  expect_equal(calls$progress$message_count, 200)
+  expect_false(result$complete)
   expect_identical(calls$progress$connection, connection)
 })
 
 
-test_that("Kineis progress update is monotonic", {
+test_that("Kineis bulk progress stores the active window and cursor", {
   calls <- new.env(parent = emptyenv())
   connection <- structure(list(), class = "test_connection")
 
@@ -396,38 +411,44 @@ test_that("Kineis progress update is monotonic", {
   )
 
   expect_equal(
-    .kineis_set_progress(
-      "123",
-      "device-a",
-      "2026-07-01T00:00:00.123Z",
+    .kineis_set_bulk_progress(
+      "2026-07-01T00:00:00.000Z",
+      "2026-07-02T00:00:00.000Z",
+      after_cursor = "99",
+      message_count = 200,
       connection = connection
     ),
     1
   )
-  expect_match(calls$statement, "INSERT INTO telemetry_progress")
-  expect_match(calls$statement, "GREATEST")
+  expect_match(calls$statement, "INSERT INTO bulk_progress")
+  expect_match(calls$statement, "afterCursor = VALUES")
   expect_equal(
     calls$params,
-    list("123", "device-a", "2026-07-01 00:00:00.123000")
+    list(
+      "2026-07-01 00:00:00.000000",
+      "2026-07-02 00:00:00.000000",
+      "99",
+      200
+    )
   )
 })
 
 
-test_that("Kineis telemetry updates both outputs in one API pass", {
+test_that("Kineis bulk telemetry resumes one account-wide window", {
   calls <- new.env(parent = emptyenv())
-  calls$downloads <- list()
-  calls$completed <- list()
+  calls$progress <- list()
 
   local_mocked_bindings(
-    .kineis_watermarks = function(devices) {
-      data.table(
-        deviceUid = c("1", "2"),
-        deviceRef = c("new-device", "existing-device"),
-        last_timestamp = c(
-          NA_character_,
-          "2026-07-20T00:00:00.000000Z"
-        )
+    .kineis_bulk_progress = function(initial_datetime) {
+      list(
+        window_start = "2026-07-01T00:00:00.000Z",
+        window_end = "2026-07-02T00:00:00.000Z",
+        after_cursor = "99",
+        message_count = 150
       )
+    },
+    kineis_data_count = function(...) {
+      stop("bulk count must not repeat after a saved cursor")
     },
     kineis_data = function(
       token,
@@ -443,94 +464,88 @@ test_that("Kineis telemetry updates both outputs in one API pass", {
       retrieve_additional_properties,
       verbose,
       page_handler,
-      collect
+      collect,
+      after_cursor
     ) {
-      calls$downloads[[device_refs]] <- as.list(environment())
-      page_handler(data.table(
-        deviceUid = if (device_refs == "new-device") "1" else "2",
-        deviceRef = device_refs,
-        msgDatetime = "2026-07-20T00:00:00Z"
-      ))
+      calls$download <- as.list(environment())
+      page_handler(
+        data.table(
+          deviceUid = "1",
+          deviceRef = "device-a",
+          msgDatetime = "2026-07-01T12:00:00.000Z"
+        ),
+        list(hasNextPage = FALSE, endCursor = "149")
+      )
       data.table()
     },
-    .kineis_persist_page = function(
-      telemetry,
-      device_uid,
-      device_ref
-    ) {
+    .kineis_persist_bulk_page = function(...) {
       list(
-        sensor_rows = 1L,
-        sensor_affected = 1L,
+        sensor_rows = 2L,
+        sensor_affected = 2L,
         doppler_rows = 1L,
         doppler_affected = 1L
       )
     },
-    .kineis_set_progress = function(
-      device_uid,
-      device_ref,
-      timestamp,
-      connection = NULL
-    ) {
-      calls$completed[[device_ref]] <- timestamp
+    .kineis_set_bulk_progress = function(...) {
+      calls$progress[[length(calls$progress) + 1]] <- list(...)
       1
     }
   )
 
-  result <- .kineis_update_telemetry(
+  result <- .kineis_update_bulk(
     token = "token",
     api_telemetry_url = "https://api.example",
-    devices = data.table(),
-    end_datetime = "2026-07-25T00:00:00.000Z",
+    target_datetime = "2026-07-02T00:00:00.000Z",
+    initial_datetime = "2000-01-01T00:00:00.000Z",
+    max_window_days = 365,
+    min_window_hours = 24,
+    target_messages = 1000,
     verbose = FALSE
   )
 
+  expect_length(calls$download$device_refs, 0)
+  expect_equal(calls$download$after_cursor, "99")
+  expect_true(calls$download$retrieve_sensors)
+  expect_true(calls$download$retrieve_doppler)
+  expect_false(calls$download$collect)
+  expect_true(result$success)
+  expect_equal(result$downloaded, 1L)
+  expect_equal(result$sensor_affected, 2L)
+  expect_equal(result$doppler_affected, 1L)
   expect_equal(
-    calls$downloads[["new-device"]]$datetime,
-    "2000-01-01T00:00:00.000Z"
+    calls$progress[[1]][[1]],
+    "2026-07-02T00:00:00.000Z"
   )
-  expect_equal(
-    calls$downloads[["existing-device"]]$datetime,
-    "2026-07-18T00:00:00.000Z"
-  )
-  expect_true(calls$downloads[["new-device"]]$retrieve_sensors)
-  expect_true(calls$downloads[["new-device"]]$retrieve_doppler)
-  expect_false(calls$downloads[["new-device"]]$verbose)
-  expect_false(calls$downloads[["new-device"]]$collect)
-  expect_equal(
-    calls$completed[["new-device"]],
-    "2026-07-25T00:00:00.000Z"
-  )
-  expect_true(all(result$success))
-  expect_equal(result$downloaded, c(1L, 1L))
-  expect_equal(result$sensor_affected, c(1L, 1L))
-  expect_equal(result$doppler_affected, c(1L, 1L))
 })
 
 
-test_that("Kineis telemetry defers after an exhausted rate limit", {
+test_that("Kineis bulk telemetry defers with its exact page cursor saved", {
   calls <- new.env(parent = emptyenv())
-  calls$downloads <- 0L
   calls$persisted <- 0L
 
   local_mocked_bindings(
-    .kineis_watermarks = function(devices) {
-      data.table(
-        deviceUid = c("1", "2"),
-        deviceRef = c("device-a", "device-b"),
-        last_timestamp = c(NA_character_, NA_character_)
+    .kineis_bulk_progress = function(initial_datetime) {
+      list(
+        window_start = "2026-07-01T00:00:00.000Z",
+        window_end = "2026-07-02T00:00:00.000Z",
+        after_cursor = "99",
+        message_count = 200
       )
     },
     kineis_data = function(...) {
-      calls$downloads <- calls$downloads + 1L
       arguments <- list(...)
-      arguments$page_handler(data.table(
-        deviceUid = "1",
-        deviceRef = "device-a",
-        msgDatetime = "2026-07-20T00:00:00Z"
-      ))
+      expect_equal(arguments$after_cursor, "99")
+      arguments$page_handler(
+        data.table(
+          deviceUid = "1",
+          deviceRef = "device-a",
+          msgDatetime = "2026-07-01T12:00:00.000Z"
+        ),
+        list(hasNextPage = TRUE, endCursor = "199")
+      )
       stop(kineis_rate_limit())
     },
-    .kineis_persist_page = function(...) {
+    .kineis_persist_bulk_page = function(...) {
       calls$persisted <- calls$persisted + 1L
       list(
         sensor_rows = 2L,
@@ -541,17 +556,18 @@ test_that("Kineis telemetry defers after an exhausted rate limit", {
     }
   )
 
-  result <- .kineis_update_telemetry(
+  result <- .kineis_update_bulk(
     token = "token",
     api_telemetry_url = "https://api.example",
-    devices = data.table(),
-    end_datetime = "2026-07-25T00:00:00.000Z",
+    target_datetime = "2026-07-02T00:00:00.000Z",
+    initial_datetime = "2000-01-01T00:00:00.000Z",
+    max_window_days = 365,
+    min_window_hours = 24,
+    target_messages = 1000,
     verbose = FALSE
   )
 
-  expect_equal(calls$downloads, 1L)
   expect_equal(calls$persisted, 1L)
-  expect_equal(nrow(result), 1L)
   expect_false(result$success)
   expect_true(result$deferred)
   expect_equal(result$downloaded, 1L)
@@ -561,8 +577,26 @@ test_that("Kineis telemetry defers after an exhausted rate limit", {
 })
 
 
-test_that("KINEIS update returns a deferred telemetry summary", {
+test_that("Kineis bulk windows shrink toward the configured minimum", {
+  expect_equal(
+    .kineis_shrunk_window_end(
+      "2026-07-01T00:00:00.000Z",
+      "2026-07-05T00:00:00.000Z",
+      min_window_hours = 24
+    ),
+    "2026-07-03T00:00:00.000Z"
+  )
+  expect_null(.kineis_shrunk_window_end(
+    "2026-07-01T00:00:00.000Z",
+    "2026-07-02T00:00:00.000Z",
+    min_window_hours = 24
+  ))
+})
+
+
+test_that("KINEIS bulk update returns a deferred window summary", {
   local_mocked_bindings(
+    .kineis_require_bulk_api = function() TRUE,
     .kineis_credentials = function() {
       list(
         un = "username",
@@ -574,15 +608,12 @@ test_that("KINEIS update returns a deferred telemetry summary", {
     kineis_login = function(un, pwd, auth_url, verbose) {
       list(access_token = "token")
     },
-    kineis_devlist = function(token, api_telemetry_url, verbose) {
-      data.table(deviceUid = "1", deviceRef = "device-a")
-    },
     .kineis_current_datetime = function() {
       "2026-07-25T00:00:00.000Z"
     },
-    .kineis_update_telemetry = function(...) {
+    .kineis_update_bulk = function(...) {
       data.table(
-        deviceRef = "device-a",
+        window_start = "2026-07-01T00:00:00.000Z",
         success = FALSE,
         deferred = TRUE,
         error = "HTTP 429 Too Many Requests."
@@ -591,7 +622,7 @@ test_that("KINEIS update returns a deferred telemetry summary", {
   )
 
   expect_message(
-    result <- withVisible(KINEIS_update(verbose = FALSE)),
+    result <- withVisible(KINEIS_update_bulk(verbose = FALSE)),
     "update deferred",
     fixed = TRUE
   )
@@ -599,58 +630,18 @@ test_that("KINEIS update returns a deferred telemetry summary", {
   expect_false(result$visible)
   expect_equal(result$value$status, "deferred")
   expect_true(result$value$deferred)
-  expect_equal(result$value$deferred_stage, "telemetry")
-  expect_equal(result$value$devices, 1L)
+  expect_equal(result$value$deferred_stage, "bulk telemetry")
   expect_equal(result$value$error, "HTTP 429 Too Many Requests.")
-  expect_true(result$value$telemetry$deferred)
+  expect_true(result$value$windows$deferred)
 })
 
 
-test_that("KINEIS update defers a rate-limited device list", {
-  calls <- new.env(parent = emptyenv())
-  calls$telemetry <- 0L
-
-  local_mocked_bindings(
-    .kineis_credentials = function() {
-      list(
-        un = "username",
-        pwd = "password",
-        auth_url = "https://auth.example",
-        api_telemetry_url = "https://api.example"
-      )
-    },
-    kineis_login = function(un, pwd, auth_url, verbose) {
-      list(access_token = "token")
-    },
-    kineis_devlist = function(token, api_telemetry_url, verbose) {
-      stop(kineis_rate_limit())
-    },
-    .kineis_update_telemetry = function(...) {
-      calls$telemetry <- calls$telemetry + 1L
-    }
-  )
-
-  expect_message(
-    result <- withVisible(KINEIS_update(verbose = FALSE)),
-    "during device list",
-    fixed = TRUE
-  )
-
-  expect_false(result$visible)
-  expect_equal(calls$telemetry, 0L)
-  expect_equal(result$value$status, "deferred")
-  expect_true(result$value$deferred)
-  expect_equal(result$value$deferred_stage, "device list")
-  expect_true(is.na(result$value$devices))
-  expect_match(result$value$error, "HTTP 429")
-})
-
-
-test_that("KINEIS update runs one combined telemetry pass", {
+test_that("KINEIS bulk update runs one account-wide bulk pass", {
   calls <- new.env(parent = emptyenv())
   calls$updates <- 0L
 
   local_mocked_bindings(
+    .kineis_require_bulk_api = function() TRUE,
     .kineis_credentials = function() {
       list(
         un = "username",
@@ -666,41 +657,34 @@ test_that("KINEIS update runs one combined telemetry pass", {
       expect_false(verbose)
       list(access_token = "token")
     },
-    kineis_devlist = function(token, api_telemetry_url, verbose) {
-      expect_true(is.function(token))
-      expect_equal(token()$access_token, "token")
-      expect_equal(api_telemetry_url, "https://api.example")
-      expect_false(verbose)
-      data.table(deviceUid = "1", deviceRef = "device-a")
-    },
     .kineis_current_datetime = function() {
       "2026-07-25T00:00:00.000Z"
     },
-    .kineis_update_telemetry = function(
+    .kineis_update_bulk = function(
       token,
       api_telemetry_url,
-      devices,
-      end_datetime,
+      target_datetime,
+      initial_datetime,
+      max_window_days,
+      min_window_hours,
+      target_messages,
       verbose
     ) {
       calls$updates <- calls$updates + 1L
+      expect_true(is.function(token))
+      expect_equal(api_telemetry_url, "https://api.example")
+      expect_equal(target_datetime, "2026-07-25T00:00:00.000Z")
       expect_false(verbose)
-      expect_equal(end_datetime, "2026-07-25T00:00:00.000Z")
-      data.table(
-        deviceRef = "device-a",
-        success = TRUE,
-        deferred = FALSE
-      )
+      data.table(success = TRUE, deferred = FALSE)
     }
   )
 
-  result <- withVisible(KINEIS_update(verbose = FALSE))
+  result <- withVisible(KINEIS_update_bulk(verbose = FALSE))
 
   expect_false(result$visible)
   expect_equal(calls$updates, 1L)
   expect_equal(result$value$status, "complete")
   expect_false(result$value$deferred)
   expect_true(is.na(result$value$deferred_stage))
-  expect_equal(result$value$devices, 1)
-  expect_true(result$value$telemetry$success)
+  expect_true(result$value$windows$success)
 })

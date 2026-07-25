@@ -58,35 +58,40 @@ MariaDB primary keys make this overlap idempotent.
 
 ## Kinéis pipeline
 
-`KINEIS_update()` requests sensors and Doppler together, then updates both
-tables from each page. Kinéis pagination occurs inside each device: a device
-with many messages can require many bulk API requests.
+`KINEIS_update_bulk()` performs the historical backfill. It requests sensors
+and Doppler together for all authorized devices and updates both tables from
+each page. The bulk-count endpoint keeps dense historical windows bounded.
 
 ```text
 obtain or renew JWT
     ↓
-read shared telemetry checkpoint from MariaDB
+read active bulk window and cursor from MariaDB
     ↓
-request one page with sensors and Doppler in ascending msgDatetime order
+count all-device messages in the window
+    ↓
+halve the window when it exceeds the target size
+    ↓
+request one all-device page with sensors and Doppler
     ↓
 prepare sensor and Doppler rows
     ↓
-write both outputs and advance telemetry_progress in one transaction
+write both outputs and the next cursor in one transaction
     ↓
 read pageInfo$endCursor
     ↓
 request next cursor
     ↺ while pageInfo$hasNextPage is true
     ↓
-request next device
+mark the bounded window complete
+    ↓
+advance to the next window
 ```
 
 
-Each Kinéis page and its shared checkpoint are committed before the next cursor
-is requested. The initial combined run starts from 2000 for every device so it
-can recover historical Doppler rows that the former sensor-first pipeline never
-reached. If rate limiting remains active after automatic retries,
-`KINEIS_update()` stops making requests and returns normally with
-`status = "deferred"`. The next scheduled run resumes from the latest persisted
-page with a two-day overlap. API calls are paced and retried; expired JWTs are
-renewed automatically.
+Each Kinéis page and its cursor are committed before the next cursor is
+requested. The first run starts at 2000-01-01 unless `bulk_progress` already
+contains a checkpoint. Empty windows are advanced without a data request. If
+rate limiting or a temporary API failure remains active after automatic
+retries, `KINEIS_update_bulk()` returns normally with `status = "deferred"`.
+The next scheduled run resumes the exact window and cursor. API calls are paced
+and expired JWTs are renewed automatically.
