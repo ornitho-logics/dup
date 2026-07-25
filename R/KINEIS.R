@@ -635,6 +635,17 @@ KINEIS_update <- function(verbose = interactive()) {
         )
       },
       error = function(e) {
+        if (inherits(e, "httr2_http_429")) {
+          stop(
+            paste(
+              "Kineis API rate limiting remained active after automatic",
+              "retries; stopping this update to avoid repeated HTTP 429",
+              "requests."
+            ),
+            call. = FALSE
+          )
+        }
+
         data.table(
           deviceUid = device_uid,
           deviceRef = device_ref,

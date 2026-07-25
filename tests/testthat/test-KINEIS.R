@@ -229,6 +229,52 @@ test_that("Kineis sensor updates overlap existing data", {
 })
 
 
+test_that("Kineis update stops after an exhausted rate limit", {
+  calls <- new.env(parent = emptyenv())
+  calls$downloads <- 0L
+  rate_limit <- structure(
+    list(
+      message = "HTTP 429 Too Many Requests.",
+      call = NULL
+    ),
+    class = c(
+      "httr2_http_429",
+      "httr2_http",
+      "httr2_error",
+      "error",
+      "condition"
+    )
+  )
+
+  local_mocked_bindings(
+    .kineis_watermarks = function(devices, table) {
+      data.table(
+        deviceUid = c("1", "2"),
+        deviceRef = c("device-a", "device-b"),
+        last_timestamp = c(NA_character_, NA_character_)
+      )
+    },
+    kineis_data = function(...) {
+      calls$downloads <- calls$downloads + 1L
+      stop(rate_limit)
+    }
+  )
+
+  expect_error(
+    .kineis_update_sensors(
+      token = "token",
+      api_telemetry_url = "https://api.example",
+      devices = data.table(),
+      end_datetime = "2026-07-25T00:00:00.000Z",
+      verbose = FALSE
+    ),
+    "stopping this update to avoid repeated HTTP 429",
+    fixed = TRUE
+  )
+  expect_equal(calls$downloads, 1L)
+})
+
+
 test_that("KINEIS update runs both data layers in order", {
   calls <- new.env(parent = emptyenv())
   calls$order <- character()
