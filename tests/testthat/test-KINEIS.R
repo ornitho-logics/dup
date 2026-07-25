@@ -1,3 +1,32 @@
+test_that("Kineis credentials default the public API endpoints", {
+  credentials <- .kineis_credentials(list(
+    un = "username",
+    pwd = "password"
+  ))
+
+  expect_equal(
+    credentials$auth_url,
+    paste0(
+      "https://account.groupcls.com/auth/realms/cls/",
+      "protocol/openid-connect/token"
+    )
+  )
+  expect_equal(
+    credentials$api_telemetry_url,
+    "https://api.groupcls.com/telemetry/api/v1"
+  )
+})
+
+
+test_that("Kineis credentials fail before HTTP when secrets are missing", {
+  expect_error(
+    .kineis_credentials(list()),
+    "missing non-empty fields: un, pwd",
+    fixed = TRUE
+  )
+})
+
+
 test_that("Kineis sensor preparation supports flattened API fields", {
   telemetry <- data.table(
     deviceUid = c("123", "123"),

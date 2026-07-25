@@ -23,4 +23,8 @@ tables. Each device and data layer is updated independently.
 Devices without stored rows are downloaded from 2000-01-01. Existing devices
 are resumed two days before their latest stored message time, and rows whose
 database key is already present are left unchanged.
+
+The public Kinéis authentication and telemetry endpoints are used when
+\code{auth_url} or \code{api_telemetry_url} is absent from the configuration. The
+\code{kineis_api} configuration must provide non-empty \code{un} and \code{pwd} values.
 }

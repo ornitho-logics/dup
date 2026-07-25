@@ -8,6 +8,10 @@
 #' are resumed two days before their latest stored message time, and rows whose
 #' database key is already present are left unchanged.
 #'
+#' The public Kinéis authentication and telemetry endpoints are used when
+#' `auth_url` or `api_telemetry_url` is absent from the configuration. The
+#' `kineis_api` configuration must provide non-empty `un` and `pwd` values.
+#'
 #' @param verbose Show stage and per-device progress. Defaults to
 #'   [interactive()].
 #'
@@ -61,7 +65,6 @@ KINEIS_update <- function(verbose = interactive()) {
   ))
 }
 
-
 .kineis_inform <- function(verbose, text) {
   if (verbose) {
     message(text)
@@ -70,11 +73,59 @@ KINEIS_update <- function(verbose = interactive()) {
   invisible(NULL)
 }
 
+.kineis_credentials <- function(
+  credentials = config::get(config = "kineis_api")
+) {
+  if (!is.list(credentials)) {
+    stop(
+      "The `kineis_api` configuration must be a list.",
+      call. = FALSE
+    )
+  }
 
-.kineis_credentials <- function() {
-  config::get(config = "kineis_api")
+  defaults <- list(
+    auth_url = paste0(
+      "https://account.groupcls.com/auth/realms/cls/",
+      "protocol/openid-connect/token"
+    ),
+    api_telemetry_url = "https://api.groupcls.com/telemetry/api/v1"
+  )
+
+  for (field in names(defaults)) {
+    if (!.kineis_nonempty_string(credentials[[field]])) {
+      credentials[[field]] <- defaults[[field]]
+    }
+  }
+
+  required <- c("un", "pwd", "auth_url", "api_telemetry_url")
+  missing_fields <- required[
+    !vapply(
+      credentials[required],
+      .kineis_nonempty_string,
+      logical(1)
+    )
+  ]
+
+  if (length(missing_fields) > 0) {
+    stop(
+      glue(
+        "The `kineis_api` configuration is missing non-empty fields: ",
+        "{toString(missing_fields)}"
+      ),
+      call. = FALSE
+    )
+  }
+
+  credentials
 }
 
+
+.kineis_nonempty_string <- function(x) {
+  is.character(x) &&
+    length(x) == 1 &&
+    !is.na(x) &&
+    nzchar(x)
+}
 
 .kineis_current_datetime <- function() {
   Sys.time() |>
@@ -84,7 +135,6 @@ KINEIS_update <- function(verbose = interactive()) {
       tz = "UTC"
     )
 }
-
 
 .kineis_prepare_devices <- function(devices) {
   devices <- data.table::copy(as.data.table(devices))
@@ -115,7 +165,6 @@ KINEIS_update <- function(verbose = interactive()) {
   unique(devices, by = c("deviceUid", "deviceRef"))
 }
 
-
 .kineis_field <- function(x, name) {
   if (name %in% names(x)) {
     x[[name]]
@@ -123,7 +172,6 @@ KINEIS_update <- function(verbose = interactive()) {
     rep(NA, nrow(x))
   }
 }
-
 
 .kineis_api_sql_time <- function(x) {
   time <- ymd_hms(x, tz = "UTC", quiet = TRUE)
@@ -133,7 +181,6 @@ KINEIS_update <- function(verbose = interactive()) {
     tz = "UTC"
   )
 }
-
 
 .kineis_from_datetime <- function(
   last_timestamp,
@@ -163,7 +210,6 @@ KINEIS_update <- function(verbose = interactive()) {
     tz = "UTC"
   )
 }
-
 
 .kineis_parse_sensors <- function(value) {
   if (is.null(value) || length(value) == 0) {
@@ -208,12 +254,10 @@ KINEIS_update <- function(verbose = interactive()) {
   )
 }
 
-
 .kineis_sensor_id <- function(x) {
   id <- stringr::str_extract(x, "[0-9]+$")
   suppressWarnings(as.integer(id))
 }
-
 
 .kineis_prepare_sensors <- function(telemetry) {
   telemetry <- data.table::copy(as.data.table(telemetry))
@@ -251,8 +295,7 @@ KINEIS_update <- function(verbose = interactive()) {
       )
     }
 
-    wide <- telemetry[
-      ,
+    wide <- telemetry[,
       c(required, sensor_columns),
       with = FALSE
     ]
@@ -265,8 +308,7 @@ KINEIS_update <- function(verbose = interactive()) {
       variable.factor = FALSE,
       na.rm = TRUE
     )
-    flattened[
-      ,
+    flattened[,
       sensor_name := sub("^sensors\\.", "", sensor_name)
     ]
     parts[[length(parts) + 1]] <- flattened
@@ -341,7 +383,6 @@ KINEIS_update <- function(verbose = interactive()) {
   unique(output, by = c("deviceUid", "msgDatetime", "sensor"))
 }
 
-
 .kineis_prepare_doppler <- function(telemetry) {
   telemetry <- data.table::copy(as.data.table(telemetry))
 
@@ -384,7 +425,6 @@ KINEIS_update <- function(verbose = interactive()) {
   unique(output, by = c("deviceUid", "msgDatetime"))
 }
 
-
 .kineis_watermark_query <- function(table) {
   table <- match.arg(table, c("sensors", "doppler"))
 
@@ -402,7 +442,6 @@ KINEIS_update <- function(verbose = interactive()) {
   ) |>
     as.character()
 }
-
 
 .kineis_watermarks <- function(devices, table) {
   devices <- data.table::copy(as.data.table(devices))
@@ -435,7 +474,6 @@ KINEIS_update <- function(verbose = interactive()) {
   devices[, has_data := NULL]
   devices
 }
-
 
 .kineis_insert_sensors <- function(sensors) {
   if (nrow(sensors) == 0) {
@@ -472,7 +510,6 @@ KINEIS_update <- function(verbose = interactive()) {
 
   DBI::dbExecute(connection, statement)
 }
-
 
 .kineis_insert_doppler <- function(doppler) {
   if (nrow(doppler) == 0) {
@@ -521,7 +558,6 @@ KINEIS_update <- function(verbose = interactive()) {
 
   DBI::dbExecute(connection, statement)
 }
-
 
 .kineis_update_layer <- function(
   layer,
@@ -654,7 +690,6 @@ KINEIS_update <- function(verbose = interactive()) {
   result
 }
 
-
 .kineis_update_sensors <- function(
   token,
   api_telemetry_url,
@@ -675,7 +710,6 @@ KINEIS_update <- function(verbose = interactive()) {
     verbose = verbose
   )
 }
-
 
 .kineis_update_doppler <- function(
   token,
