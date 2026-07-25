@@ -20,8 +20,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 0 */12 * * * Rscript --default-packages=dup -e  'DRUID_update()'
 
 # KINEIS (daily at 02:00)
-# flock skips this run cleanly if another KINEIS update holds the lock.
-0 2 * * * /usr/bin/flock -n -E 0 /tmp/dup-kineis-update.lock /usr/bin/Rscript --default-packages=dup -e 'KINEIS_update()'
+0 2 * * * run-one Rscript --default-packages=dup -e 'KINEIS_update()'
 
 
 # ---- [Maintenance] ----
