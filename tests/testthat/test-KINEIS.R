@@ -1,3 +1,20 @@
+kineis_rate_limit <- function() {
+  structure(
+    list(
+      message = "HTTP 429 Too Many Requests.",
+      call = NULL
+    ),
+    class = c(
+      "httr2_http_429",
+      "httr2_http",
+      "httr2_error",
+      "error",
+      "condition"
+    )
+  )
+}
+
+
 test_that("Kineis credentials default the public API endpoints", {
   credentials <- .kineis_credentials(list(
     un = "username",
@@ -284,23 +301,10 @@ test_that("Kineis sensor updates overlap existing data", {
 })
 
 
-test_that("Kineis update stops after an exhausted rate limit", {
+test_that("Kineis layer defers after an exhausted rate limit", {
   calls <- new.env(parent = emptyenv())
   calls$downloads <- 0L
   calls$inserted <- 0L
-  rate_limit <- structure(
-    list(
-      message = "HTTP 429 Too Many Requests.",
-      call = NULL
-    ),
-    class = c(
-      "httr2_http_429",
-      "httr2_http",
-      "httr2_error",
-      "error",
-      "condition"
-    )
-  )
 
   local_mocked_bindings(
     .kineis_watermarks = function(devices, table) {
@@ -318,7 +322,7 @@ test_that("Kineis update stops after an exhausted rate limit", {
         msgDatetime = "2026-07-20T00:00:00Z",
         sensors.SENSOR1 = "7.6"
       ))
-      stop(rate_limit)
+      stop(kineis_rate_limit())
     },
     .kineis_insert_sensors = function(sensors) {
       calls$inserted <- calls$inserted + nrow(sensors)
@@ -326,19 +330,120 @@ test_that("Kineis update stops after an exhausted rate limit", {
     }
   )
 
-  expect_error(
-    .kineis_update_sensors(
-      token = "token",
-      api_telemetry_url = "https://api.example",
-      devices = data.table(),
-      end_datetime = "2026-07-25T00:00:00.000Z",
-      verbose = FALSE
-    ),
-    "stopping this update to avoid repeated HTTP 429",
-    fixed = TRUE
+  result <- .kineis_update_sensors(
+    token = "token",
+    api_telemetry_url = "https://api.example",
+    devices = data.table(),
+    end_datetime = "2026-07-25T00:00:00.000Z",
+    verbose = FALSE
   )
+
   expect_equal(calls$downloads, 1L)
   expect_equal(calls$inserted, 1L)
+  expect_equal(nrow(result), 1L)
+  expect_false(result$success)
+  expect_true(result$deferred)
+  expect_equal(result$downloaded, 1L)
+  expect_equal(result$affected, 1L)
+  expect_match(result$error, "HTTP 429")
+})
+
+
+test_that("KINEIS update defers remaining layers without an error", {
+  calls <- new.env(parent = emptyenv())
+  calls$order <- character()
+
+  local_mocked_bindings(
+    .kineis_credentials = function() {
+      list(
+        un = "username",
+        pwd = "password",
+        auth_url = "https://auth.example",
+        api_telemetry_url = "https://api.example"
+      )
+    },
+    kineis_login = function(un, pwd, auth_url, verbose) {
+      list(access_token = "token")
+    },
+    kineis_devlist = function(token, api_telemetry_url, verbose) {
+      data.table(deviceUid = "1", deviceRef = "device-a")
+    },
+    .kineis_current_datetime = function() {
+      "2026-07-25T00:00:00.000Z"
+    },
+    .kineis_update_sensors = function(...) {
+      calls$order <- c(calls$order, "sensors")
+      data.table(
+        deviceRef = "device-a",
+        success = FALSE,
+        deferred = TRUE,
+        error = "HTTP 429 Too Many Requests."
+      )
+    },
+    .kineis_update_doppler = function(...) {
+      calls$order <- c(calls$order, "doppler")
+      stop("Doppler should not run after a sensor deferral.")
+    }
+  )
+
+  expect_message(
+    result <- withVisible(KINEIS_update(verbose = FALSE)),
+    "update deferred",
+    fixed = TRUE
+  )
+
+  expect_false(result$visible)
+  expect_equal(calls$order, "sensors")
+  expect_equal(result$value$status, "deferred")
+  expect_true(result$value$deferred)
+  expect_equal(result$value$deferred_stage, "sensors")
+  expect_equal(result$value$devices, 1L)
+  expect_equal(result$value$error, "HTTP 429 Too Many Requests.")
+  expect_true(result$value$sensors$deferred)
+  expect_equal(nrow(result$value$doppler), 0L)
+})
+
+
+test_that("KINEIS update defers a rate-limited device list", {
+  calls <- new.env(parent = emptyenv())
+  calls$data_layers <- 0L
+
+  local_mocked_bindings(
+    .kineis_credentials = function() {
+      list(
+        un = "username",
+        pwd = "password",
+        auth_url = "https://auth.example",
+        api_telemetry_url = "https://api.example"
+      )
+    },
+    kineis_login = function(un, pwd, auth_url, verbose) {
+      list(access_token = "token")
+    },
+    kineis_devlist = function(token, api_telemetry_url, verbose) {
+      stop(kineis_rate_limit())
+    },
+    .kineis_update_sensors = function(...) {
+      calls$data_layers <- calls$data_layers + 1L
+    },
+    .kineis_update_doppler = function(...) {
+      calls$data_layers <- calls$data_layers + 1L
+    }
+  )
+
+  expect_message(
+    result <- withVisible(KINEIS_update(verbose = FALSE)),
+    "during device list",
+    fixed = TRUE
+  )
+
+  expect_false(result$visible)
+  expect_equal(calls$data_layers, 0L)
+  expect_equal(result$value$status, "deferred")
+  expect_true(result$value$deferred)
+  expect_equal(result$value$deferred_stage, "device list")
+  expect_true(is.na(result$value$devices))
+  expect_match(result$value$error, "HTTP 429")
 })
 
 
@@ -402,6 +507,9 @@ test_that("KINEIS update runs both data layers in order", {
 
   expect_false(result$visible)
   expect_equal(calls$order, c("sensors", "doppler"))
+  expect_equal(result$value$status, "complete")
+  expect_false(result$value$deferred)
+  expect_true(is.na(result$value$deferred_stage))
   expect_equal(result$value$devices, 1)
   expect_true(result$value$sensors$success)
   expect_true(result$value$doppler$success)

@@ -11,8 +11,9 @@ KINEIS_update(verbose = interactive())
 \code{\link[=interactive]{interactive()}}.}
 }
 \value{
-Invisibly, a list containing the device count and sensor and Doppler
-update summaries by device.
+Invisibly, a list containing \code{status}, \code{deferred},
+\code{deferred_stage}, the device count, and sensor and Doppler update summaries
+by device. \code{status} is \code{"complete"} or \code{"deferred"}.
 }
 \description{
 Logs in using the \code{kineis_api} configuration, retrieves the devices
@@ -26,7 +27,9 @@ database key is already present are left unchanged.
 Each chronologically ordered API page is written immediately, so an
 interrupted initial backfill resumes from the latest persisted page.
 Authentication tokens are renewed before expiry and after an unexpected
-HTTP 401 response.
+HTTP 401 response. If HTTP 429 rate limiting is encountered (after automatic
+retries where configured), the update returns normally with a deferred
+status. The next scheduled run resumes from the latest persisted page.
 
 The public Kinéis authentication and telemetry endpoints are used when
 \code{auth_url} or \code{api_telemetry_url} is absent from the configuration. The

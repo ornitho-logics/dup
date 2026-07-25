@@ -10,7 +10,9 @@
 #' Each chronologically ordered API page is written immediately, so an
 #' interrupted initial backfill resumes from the latest persisted page.
 #' Authentication tokens are renewed before expiry and after an unexpected
-#' HTTP 401 response.
+#' HTTP 401 response. If HTTP 429 rate limiting is encountered (after automatic
+#' retries where configured), the update returns normally with a deferred
+#' status. The next scheduled run resumes from the latest persisted page.
 #'
 #' The public Kinéis authentication and telemetry endpoints are used when
 #' `auth_url` or `api_telemetry_url` is absent from the configuration. The
@@ -19,8 +21,9 @@
 #' @param verbose Show stage and per-device progress. Defaults to
 #'   [interactive()].
 #'
-#' @return Invisibly, a list containing the device count and sensor and Doppler
-#'   update summaries by device.
+#' @return Invisibly, a list containing `status`, `deferred`,
+#'   `deferred_stage`, the device count, and sensor and Doppler update summaries
+#'   by device. `status` is `"complete"` or `"deferred"`.
 #' @export
 KINEIS_update <- function(verbose = interactive()) {
   .kineis_require_streaming_api()
@@ -28,15 +31,39 @@ KINEIS_update <- function(verbose = interactive()) {
   credentials <- .kineis_credentials()
 
   token <- .kineis_token_provider(credentials)
-  token()
+  authentication <- tryCatch(
+    {
+      token()
+      NULL
+    },
+    httr2_http_429 = identity
+  )
+
+  if (inherits(authentication, "httr2_http_429")) {
+    return(invisible(.kineis_deferred_update(
+      stage = "authentication",
+      error = conditionMessage(authentication)
+    )))
+  }
 
   .kineis_inform(verbose, "KINEIS: retrieving the device list.")
-  devices <- kineis_devlist(
-    token,
-    api_telemetry_url = credentials$api_telemetry_url,
-    verbose = FALSE
-  ) |>
-    .kineis_prepare_devices()
+  devices <- tryCatch(
+    kineis_devlist(
+      token,
+      api_telemetry_url = credentials$api_telemetry_url,
+      verbose = FALSE
+    ) |>
+      .kineis_prepare_devices(),
+    httr2_http_429 = identity
+  )
+
+  if (inherits(devices, "httr2_http_429")) {
+    return(invisible(.kineis_deferred_update(
+      stage = "device list",
+      error = conditionMessage(devices)
+    )))
+  }
+
   .kineis_inform(
     verbose,
     glue("KINEIS: device list complete; {nrow(devices)} device(s).")
@@ -50,6 +77,16 @@ KINEIS_update <- function(verbose = interactive()) {
     end_datetime = end_datetime,
     verbose = verbose
   )
+
+  if (.kineis_was_deferred(sensors)) {
+    return(invisible(.kineis_deferred_update(
+      stage = "sensors",
+      devices = nrow(devices),
+      sensors = sensors,
+      error = .kineis_deferred_error(sensors)
+    )))
+  }
+
   doppler <- .kineis_update_doppler(
     token,
     api_telemetry_url = credentials$api_telemetry_url,
@@ -57,13 +94,67 @@ KINEIS_update <- function(verbose = interactive()) {
     end_datetime = end_datetime,
     verbose = verbose
   )
+
+  if (.kineis_was_deferred(doppler)) {
+    return(invisible(.kineis_deferred_update(
+      stage = "doppler",
+      devices = nrow(devices),
+      sensors = sensors,
+      doppler = doppler,
+      error = .kineis_deferred_error(doppler)
+    )))
+  }
+
   .kineis_inform(verbose, "KINEIS: update complete.")
 
   invisible(list(
+    status = "complete",
+    deferred = FALSE,
+    deferred_stage = NA_character_,
     devices = nrow(devices),
     sensors = sensors,
-    doppler = doppler
+    doppler = doppler,
+    error = NA_character_
   ))
+}
+
+
+.kineis_was_deferred <- function(x) {
+  is.data.frame(x) &&
+    "deferred" %in% names(x) &&
+    any(x[["deferred"]] %in% TRUE)
+}
+
+
+.kineis_deferred_error <- function(x) {
+  x[x[["deferred"]] %in% TRUE][["error"]][1]
+}
+
+
+.kineis_deferred_update <- function(
+  stage,
+  devices = NA_integer_,
+  sensors = data.table(),
+  doppler = data.table(),
+  error = NA_character_
+) {
+  message(
+    glue(
+      "KINEIS: API rate limiting is active during {stage}; update deferred. ",
+      "The next scheduled run will resume ",
+      "from the latest persisted page."
+    )
+  )
+
+  list(
+    status = "deferred",
+    deferred = TRUE,
+    deferred_stage = stage,
+    devices = devices,
+    sensors = sensors,
+    doppler = doppler,
+    error = error
+  )
 }
 
 
@@ -647,7 +738,10 @@ KINEIS_update <- function(verbose = interactive()) {
     glue("{label}: {total_devices} device(s) to update.")
   )
 
-  results <- lapply(seq_len(total_devices), function(i) {
+  results <- vector("list", total_devices)
+  result_count <- 0L
+
+  for (i in seq_len(total_devices)) {
     device_uid <- watermarks$deviceUid[i]
     device_ref <- watermarks$deviceRef[i]
     from <- .kineis_from_datetime(
@@ -719,6 +813,7 @@ KINEIS_update <- function(verbose = interactive()) {
           downloaded = downloaded_count,
           affected = affected_count,
           success = TRUE,
+          deferred = FALSE,
           error = NA_character_
         )
       },
@@ -734,14 +829,17 @@ KINEIS_update <- function(verbose = interactive()) {
         }
 
         if (inherits(e, "httr2_http_429")) {
-          stop(
-            paste(
-              "Kineis API rate limiting remained active after automatic",
-              "retries; stopping this update to avoid repeated HTTP 429",
-              "requests."
-            ),
-            call. = FALSE
-          )
+          return(data.table(
+            deviceUid = device_uid,
+            deviceRef = device_ref,
+            from = from,
+            to = end_datetime,
+            downloaded = downloaded_count,
+            affected = affected_count,
+            success = FALSE,
+            deferred = TRUE,
+            error = conditionMessage(e)
+          ))
         }
 
         data.table(
@@ -752,6 +850,7 @@ KINEIS_update <- function(verbose = interactive()) {
           downloaded = NA_integer_,
           affected = NA_integer_,
           success = FALSE,
+          deferred = FALSE,
           error = conditionMessage(e)
         )
       }
@@ -766,6 +865,15 @@ KINEIS_update <- function(verbose = interactive()) {
           "{result$affected} inserted."
         )
       )
+    } else if (result$deferred) {
+      .kineis_inform(
+        verbose,
+        glue(
+          "{label} [{i}/{total_devices}] {device_ref}: ",
+          "rate limited after {result$downloaded} downloaded and ",
+          "{result$affected} inserted; deferring remaining requests."
+        )
+      )
     } else {
       .kineis_inform(
         verbose,
@@ -776,15 +884,24 @@ KINEIS_update <- function(verbose = interactive()) {
       )
     }
 
-    result
-  })
+    result_count <- result_count + 1L
+    results[[result_count]] <- result
 
-  if (length(results) == 0) {
+    if (result$deferred) {
+      break
+    }
+  }
+
+  if (result_count == 0L) {
     return(data.table())
   }
 
+  results <- results[seq_len(result_count)]
   result <- rbindlist(results, use.names = TRUE, fill = TRUE)
-  failed <- result[result[["success"]] == FALSE]
+  failed <- result[
+    result[["success"]] == FALSE &
+      result[["deferred"]] == FALSE
+  ]
 
   if (nrow(failed) > 0) {
     warning(
