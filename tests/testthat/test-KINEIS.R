@@ -44,7 +44,7 @@ test_that("Kineis update requires the resumable API interface", {
 
   expect_error(
     .kineis_require_api(),
-    "requires apis >= 0.0.7",
+    "requires apis >= 0.0.8",
     fixed = TRUE
   )
 })
@@ -426,12 +426,59 @@ test_that("Kineis progress stores the active window and cursor", {
 })
 
 
+test_that("Kineis progress initializes from the requested start date", {
+  calls <- new.env(parent = emptyenv())
+  connection <- structure(list(), class = "test_connection")
+
+  local_mocked_bindings(
+    dbcon = function(db, server) connection
+  )
+  local_mocked_bindings(
+    dbExecute = function(connection, statement, params) {
+      calls$statement <- statement
+      calls$params <- params
+      1
+    },
+    dbGetQuery = function(connection, statement) {
+      data.frame(
+        window_start = "2024-01-01T00:00:00.000000Z",
+        window_end = "2024-01-01T00:00:00.000000Z",
+        after_cursor = NA_character_
+      )
+    },
+    dbDisconnect = function(connection) TRUE,
+    .package = "DBI"
+  )
+
+  result <- .kineis_progress("2024-01-01")
+
+  expect_match(calls$statement, "INSERT IGNORE INTO telemetry_progress")
+  expect_equal(
+    calls$params,
+    list(
+      "2024-01-01 00:00:00.000000",
+      "2024-01-01 00:00:00.000000"
+    )
+  )
+  expect_equal(
+    result$window_start,
+    "2024-01-01T00:00:00.000Z"
+  )
+  expect_equal(
+    result$window_end,
+    "2024-01-01T00:00:00.000Z"
+  )
+  expect_null(result$after_cursor)
+})
+
+
 test_that("Kineis telemetry resumes one account-wide daily window", {
   calls <- new.env(parent = emptyenv())
   calls$progress <- list()
 
   local_mocked_bindings(
-    .kineis_progress = function() {
+    .kineis_progress = function(start_datetime) {
+      expect_equal(start_datetime, "2024-01-01T00:00:00.000Z")
       list(
         window_start = "2026-07-01T00:00:00.000Z",
         window_end = "2026-07-02T00:00:00.000Z",
@@ -508,7 +555,8 @@ test_that("Kineis telemetry defers with its exact page cursor saved", {
   calls$persisted <- 0L
 
   local_mocked_bindings(
-    .kineis_progress = function() {
+    .kineis_progress = function(start_datetime) {
+      expect_equal(start_datetime, "2024-01-01T00:00:00.000Z")
       list(
         window_start = "2026-07-01T00:00:00.000Z",
         window_end = "2026-07-02T00:00:00.000Z",
@@ -643,12 +691,14 @@ test_that("KINEIS update runs one account-wide telemetry pass", {
     .kineis_update_telemetry = function(
       token,
       api_telemetry_url,
+      start_datetime,
       target_datetime,
       verbose
     ) {
       calls$updates <- calls$updates + 1L
       expect_true(is.function(token))
       expect_equal(api_telemetry_url, "https://api.example")
+      expect_equal(start_datetime, "2024-01-01T00:00:00.000Z")
       expect_equal(target_datetime, "2026-07-25T00:00:00.000Z")
       expect_false(verbose)
       data.table(success = TRUE, deferred = FALSE)

@@ -85,8 +85,10 @@ advance to the next window
 
 
 Each Kinéis page and its cursor are committed before the next cursor is
-requested. The clean initial state starts at 2026-01-01. If rate limiting or a
-temporary API failure remains active after automatic retries,
-`KINEIS_update()` returns normally with `status = "deferred"`. The next daily
-run resumes the exact window and cursor. API calls are paced and expired JWTs
-are renewed automatically.
+requested. On an empty database, `KINEIS_update()` starts at 2024-01-01 by
+default; use `KINEIS_update(start_date = "YYYY-MM-DD")` to choose another
+initial date. Once created, the stored checkpoint controls subsequent runs.
+If rate limiting or a temporary API failure remains active after automatic
+retries, the update returns normally with `status = "deferred"`. The next
+daily run resumes the exact window and cursor. API calls are paced and expired
+JWTs are renewed automatically.

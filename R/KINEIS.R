@@ -2,8 +2,9 @@
 #'
 #' Retrieves sensors and Doppler locations together from the Kinéis bulk API
 #' for every device available to the login profile. Time is processed in fixed
-#' one-day windows beginning at 2026-01-01. Each page and its next pagination
-#' cursor are committed together, so a deferred run resumes at the next page.
+#' one-day windows. On a fresh database, retrieval begins at `start_date`.
+#' Each page and its next pagination cursor are committed together, so a
+#' deferred run resumes at the next page.
 #'
 #' Authentication tokens are renewed before expiry and after an unexpected
 #' HTTP 401 response. If the API remains rate limited or temporarily
@@ -14,14 +15,22 @@
 #' `auth_url` or `api_telemetry_url` is absent from the configuration. The
 #' `kineis_api` configuration must provide non-empty `un` and `pwd` values.
 #'
+#' @param start_date Initial retrieval date in UTC. It may be a `"YYYY-MM-DD"`
+#'   string, an RFC 3339 datetime, a [base::Date], or a POSIX date-time. This
+#'   is used only when `telemetry_progress` has no checkpoint. Defaults to
+#'   `"2024-01-01"`.
 #' @param verbose Show stage and window progress. Defaults to [interactive()].
 #'
 #' @return Invisibly, a list containing `status`, `deferred`,
 #'   `deferred_stage`, and a window summary. `status` is `"complete"` or
 #'   `"deferred"`.
 #' @export
-KINEIS_update <- function(verbose = interactive()) {
+KINEIS_update <- function(
+  start_date = "2024-01-01",
+  verbose = interactive()
+) {
   .kineis_require_api()
+  start_datetime <- .kineis_rfc3339(start_date)
   .kineis_inform(verbose, "KINEIS: authenticating.")
   credentials <- .kineis_credentials()
 
@@ -45,6 +54,7 @@ KINEIS_update <- function(verbose = interactive()) {
   windows <- .kineis_update_telemetry(
     token,
     api_telemetry_url = credentials$api_telemetry_url,
+    start_datetime = start_datetime,
     target_datetime = target_datetime,
     verbose = verbose
   )
@@ -114,7 +124,7 @@ KINEIS_update <- function(verbose = interactive()) {
   if (length(missing_arguments) > 0) {
     stop(
       paste(
-        "KINEIS_update() requires apis >= 0.0.7.",
+        "KINEIS_update() requires apis >= 0.0.8.",
         "Restart R to unload the older apis namespace, then try again."
       ),
       call. = FALSE
@@ -267,15 +277,7 @@ KINEIS_update <- function(verbose = interactive()) {
 
 
 .kineis_rfc3339 <- function(x) {
-  if (inherits(x, "POSIXt")) {
-    time <- lubridate::with_tz(x, "UTC")
-  } else {
-    time <- ymd_hms(x, tz = "UTC", quiet = TRUE)
-  }
-
-  if (length(time) != 1 || is.na(time)) {
-    stop("Invalid Kineis UTC datetime.", call. = FALSE)
-  }
+  time <- .kineis_time(x)
 
   format(
     time,
@@ -508,9 +510,26 @@ KINEIS_update <- function(verbose = interactive()) {
 }
 
 
-.kineis_progress <- function() {
+.kineis_progress <- function(start_datetime) {
   connection <- dbcon(db = "KINEIS", server = "scidb")
   on.exit(DBI::dbDisconnect(connection))
+
+  start_datetime <- .kineis_api_sql_time(
+    .kineis_rfc3339(start_datetime)
+  )
+  DBI::dbExecute(
+    connection,
+    "
+    INSERT IGNORE INTO telemetry_progress (
+      id,
+      windowStart,
+      windowEnd,
+      afterCursor
+    )
+    VALUES (1, ?, ?, NULL)
+    ",
+    params = list(start_datetime, start_datetime)
+  )
 
   stored <- DBI::dbGetQuery(
     connection,
@@ -744,17 +763,32 @@ KINEIS_update <- function(verbose = interactive()) {
 
 
 .kineis_time <- function(x) {
-  if (inherits(x, "POSIXt")) {
-    return(lubridate::with_tz(x, "UTC"))
+  if (inherits(x, "Date")) {
+    if (length(x) != 1 || is.na(x)) {
+      stop("Invalid Kineis UTC datetime.", call. = FALSE)
+    }
+
+    return(as.POSIXct(x, tz = "UTC"))
   }
 
-  time <- ymd_hms(x, tz = "UTC", quiet = TRUE)
+  if (inherits(x, "POSIXt")) {
+    time <- lubridate::with_tz(x, "UTC")
+  } else if (
+    is.character(x) &&
+      length(x) == 1 &&
+      !is.na(x) &&
+      grepl("^\\d{4}-\\d{2}-\\d{2}$", x)
+  ) {
+    time <- as.POSIXct(x, format = "%Y-%m-%d", tz = "UTC")
+  } else {
+    time <- ymd_hms(x, tz = "UTC", quiet = TRUE)
+  }
 
   if (length(time) != 1 || is.na(time)) {
     stop("Invalid Kineis UTC datetime.", call. = FALSE)
   }
 
-  time
+  lubridate::with_tz(time, "UTC")
 }
 
 
@@ -806,10 +840,12 @@ KINEIS_update <- function(verbose = interactive()) {
 .kineis_update_telemetry <- function(
   token,
   api_telemetry_url,
+  start_datetime = "2024-01-01",
   target_datetime,
   verbose = interactive()
 ) {
-  state <- .kineis_progress()
+  start_datetime <- .kineis_rfc3339(start_datetime)
+  state <- .kineis_progress(start_datetime)
   target_datetime <- .kineis_rfc3339(target_datetime)
   results <- list()
 

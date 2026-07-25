@@ -4,9 +4,14 @@
 \alias{KINEIS_update}
 \title{Update the Kineis database}
 \usage{
-KINEIS_update(verbose = interactive())
+KINEIS_update(start_date = "2024-01-01", verbose = interactive())
 }
 \arguments{
+\item{start_date}{Initial retrieval date in UTC. It may be a \code{"YYYY-MM-DD"}
+string, an RFC 3339 datetime, a \link[base:Date]{base::Date}, or a POSIX date-time. This
+is used only when \code{telemetry_progress} has no checkpoint. Defaults to
+\code{"2024-01-01"}.}
+
 \item{verbose}{Show stage and window progress. Defaults to \code{\link[=interactive]{interactive()}}.}
 }
 \value{
@@ -17,8 +22,9 @@ Invisibly, a list containing \code{status}, \code{deferred},
 \description{
 Retrieves sensors and Doppler locations together from the Kinéis bulk API
 for every device available to the login profile. Time is processed in fixed
-one-day windows beginning at 2026-01-01. Each page and its next pagination
-cursor are committed together, so a deferred run resumes at the next page.
+one-day windows. On a fresh database, retrieval begins at \code{start_date}.
+Each page and its next pagination cursor are committed together, so a
+deferred run resumes at the next page.
 }
 \details{
 Authentication tokens are renewed before expiry and after an unexpected
