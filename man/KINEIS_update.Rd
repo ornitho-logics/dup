@@ -12,20 +12,21 @@ KINEIS_update(verbose = interactive())
 }
 \value{
 Invisibly, a list containing \code{status}, \code{deferred},
-\code{deferred_stage}, the device count, and sensor and Doppler update summaries
+\code{deferred_stage}, the device count, and a combined telemetry update summary
 by device. \code{status} is \code{"complete"} or \code{"deferred"}.
 }
 \description{
 Logs in using the \code{kineis_api} configuration, retrieves the devices
 available to that profile, and updates the MariaDB \code{sensors} and \code{doppler}
-tables. Each device and data layer is updated independently.
+tables. Sensors and Doppler locations are requested together and written
+from the same chronologically ordered API pages.
 }
 \details{
-Devices without stored rows are downloaded from 2000-01-01. Existing devices
-are resumed two days before their latest stored message time, and rows whose
-database key is already present are left unchanged.
-Each chronologically ordered API page is written immediately, so an
-interrupted initial backfill resumes from the latest persisted page.
+Devices without a shared telemetry checkpoint are downloaded from
+2000-01-01. Existing devices are resumed two days before their checkpoint,
+and rows whose database key is already present are left unchanged. Each page
+and its checkpoint are committed together, so an interrupted initial
+backfill resumes from the latest persisted page.
 Authentication tokens are renewed before expiry and after an unexpected
 HTTP 401 response. If HTTP 429 rate limiting is encountered (after automatic
 retries where configured), the update returns normally with a deferred

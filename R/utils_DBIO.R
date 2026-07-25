@@ -2,7 +2,7 @@
 #' @export
 #' @return a MariaDB connection object
 mariacon <- function(db) {
-  cnf = config::get()
+  cnf <- config::get()
   host <- cnf$host$name
   user <- cnf$host$dbadmin
   pwd <- cnf$host$dbpwd
@@ -75,12 +75,12 @@ mysqldump <- function(
   ...
 ) {
   if (compress) {
-    filenam = paste0(filenam, ".gz")
+    filenam <- paste0(filenam, ".gz")
   }
 
-  filepath = paste(dir, filenam, sep = .Platform$file.sep)
+  filepath <- paste(dir, filenam, sep = .Platform$file.sep)
 
-  syscall = paste0(
+  syscall <- paste0(
     'mariadb-dump --host=',
     host,
     ' --user=',
@@ -101,7 +101,7 @@ mysqldump <- function(
   )
 
   if (compress) {
-    syscall = paste0(syscall, " | gzip >", filepath)
+    syscall <- paste0(syscall, " | gzip >", filepath)
   }
 
   if (dryrun) {
@@ -138,18 +138,18 @@ mysqldump_host <- function(
   cnf = config::get(),
   exclude = c('mysql', 'information_schema', 'performance_schema', 'phpmyadmin')
 ) {
-  host = cnf$host$name
-  user = cnf$host$dbadmin
-  pwd = cnf$host$dbpwd
-  bkdir = cnf$dir$backupdir
+  host <- cnf$host$name
+  user <- cnf$host$dbadmin
+  pwd <- cnf$host$dbpwd
+  bkdir <- cnf$dir$backupdir
 
   # db listing
-  x = dbq(
+  x <- dbq(
     q = "SELECT DISTINCT TABLE_SCHEMA db FROM information_schema.`TABLES`"
   )[!db %in% exclude]
 
   # prepare dir locations
-  maindir = paste0(
+  maindir <- paste0(
     bkdir,
     '/backup_',
     host,
@@ -175,13 +175,13 @@ mysqldump_host <- function(
   ]
 
   # DUMP mysql.global_priv (users and privileges)
-  x = dbq(
+  x <- dbq(
     q = "SELECT distinct User FROM mysql.user where user not in 
                             ('debian-sys-maint', 'root', 'phpmyadmin');"
   )
   x[, sql := glue_data(.SD, "SHOW GRANTS FOR '{User}'@'%'"), by = User]
 
-  o = x[, dbq(q = sql) |> try(silent = TRUE), by = User]
+  o <- x[, dbq(q = sql) |> try(silent = TRUE), by = User]
 
   setnames(o, c('user', 'grants'))
   fwrite(o, paste0(maindir, '/USERS/grants.txt'))
@@ -208,27 +208,27 @@ mysqlrestore <- function(
   dryrun = FALSE
 ) {
   if (!missing(db) & !dryrun) {
-    makedbcall = glue(
+    makedbcall <- glue(
       'echo "CREATE DATABASE IF NOT EXISTS {db}" | mariadb -h{host} -u{user} -p{pwd}'
     )
     system(makedbcall)
   }
 
-  makedbcall = glue(
+  makedbcall <- glue(
     'echo "SET GLOBAL max_allowed_packet=1073741824" | mariadb -h{host} -u{user} -p{pwd}'
   )
   system(makedbcall)
 
-  mariadbCall = glue(
+  mariadbCall <- glue(
     'mariadb  --max-allowed-packet=1073741824 --net_buffer_length=1000000 -h{host} -u{user} -p{pwd} {db}'
   )
 
   if (tools::file_ext(file) == 'sql') {
-    syscall = paste(mariadbCall, '<', file)
+    syscall <- paste(mariadbCall, '<', file)
   }
 
   if (tools::file_ext(file) == 'gz') {
-    syscall = paste('gunzip -c', shQuote(file), "|", mariadbCall)
+    syscall <- paste('gunzip -c', shQuote(file), "|", mariadbCall)
   }
 
   if (dryrun) {
@@ -274,12 +274,12 @@ mysqlrestore_host <- function(
   host_is_set = FALSE
 ) {
   # INI
-  started.at = Sys.time()
+  started.at <- Sys.time()
 
-  host = cnf$host$name
-  user = cnf$host$dbadmin
-  pwd = cnf$host$dbpwd
-  bkdir = cnf$dir$backupdir
+  host <- cnf$host$name
+  user <- cnf$host$dbadmin
+  pwd <- cnf$host$dbpwd
+  bkdir <- cnf$dir$backupdir
 
   if (!host_is_set) {
     message('Are you sure ', host, ' is what you want?')
@@ -287,20 +287,20 @@ mysqlrestore_host <- function(
   }
 
   if (missing(backup)) {
-    x = data.table(p = list.dirs(bkdir, recursive = FALSE))
+    x <- data.table(p = list.dirs(bkdir, recursive = FALSE))
     x[,
       dt := basename(p) %>%
         str_extract('\\d{1,2}-\\b[a-zA-Z]{3}\\b-\\d{4}-\\d{2}H') %>%
         anytime
     ]
-    backup = x[dt == max(dt, na.rm = TRUE), p]
+    backup <- x[dt == max(dt, na.rm = TRUE), p]
   } else {
-    backup = paste(bkdir, backup, sep = '/')
+    backup <- paste(bkdir, backup, sep = '/')
   }
 
   message(paste('backup path is', backup))
 
-  con = DBI::dbConnect(
+  con <- DBI::dbConnect(
     RMariaDB::MariaDB(),
     user = user,
     password = pwd,
@@ -308,7 +308,7 @@ mysqlrestore_host <- function(
   )
 
   # db-s
-  o = data.table(
+  o <- data.table(
     maindirs = list.dirs(backup, full.names = FALSE, recursive = FALSE)
   )
   if (!all(o$maindirs == c('DATA', 'USERS'))) {
@@ -316,7 +316,7 @@ mysqlrestore_host <- function(
   }
 
   # DATA dump file listing
-  d = data.table(
+  d <- data.table(
     db_dumps = list.files(
       paste0(backup, '/DATA'),
       full.names = TRUE,
@@ -326,7 +326,7 @@ mysqlrestore_host <- function(
   d[, db := dirname(db_dumps) %>% basename]
 
   if (!missing(exclude)) {
-    d = d[!db %in% exclude]
+    d <- d[!db %in% exclude]
   }
 
   if (nrow(d) == 0) {
@@ -361,14 +361,14 @@ mysqlrestore_host <- function(
 
   # Restore USERS
   if (restore_users) {
-    con = DBI::dbConnect(
+    con <- DBI::dbConnect(
       RMariaDB::MariaDB(),
       user = user,
       password = pwd,
       host = host
     )
 
-    x = fread(paste0(backup, '/USERS/grants.txt'))
+    x <- fread(paste0(backup, '/USERS/grants.txt'))
     x[, id := .I]
     x[,
       o := try(DBI::dbExecute(con, grants) %>% as.character, silent = TRUE),
@@ -384,99 +384,6 @@ mysqlrestore_host <- function(
   # return time taken
 
   difftime(Sys.time(), started.at, units = 'mins')
-}
-
-
-#' rm_old_backups
-#'
-#' remove ond backups
-#' @param  path  path to backup dir. default taken from the config.yml file retrieved by
-#' @param  keep  how many prior backups to keep
-#' @return names of removed backups
-#' @export
-rm_old_backups <- function(path = config::get('dir')$backupdir, keep = 10) {
-  x = data.table(p = list.dirs(path, recursive = FALSE))
-
-  x[,
-    dt := basename(p) |>
-      stringr::str_extract("\\d{1,2}-\\b[a-zA-Z]{3}\\b-\\d{4}-\\d{2}H")
-  ]
-  x[, dt := anytime::anytime(dt)]
-
-  x = x[!is.na(dt)]
-  x[, i := .I]
-
-  x = x[, dirSize := dir_size(p), by = i]
-
-  x[dirSize == 0, fs::dir_delete(p), by = i]
-
-  x = x[dirSize > 0]
-
-  setorder(x, -dt)
-  x[, i := .I]
-  x[, remove := i > keep]
-
-  x = x[(remove)]
-
-  o = x[, removed := fs::dir_delete(p), by = i]
-
-  nrow(o)
-}
-
-
-#' txtdump
-#' @param  db     db name
-#' @param  table  table name
-#' @param  dir    directory path
-#' @param  remote when TRUE the file is uploaded to a remote host defined in cnf
-#' @param  cnf  configuration variables (host, user, pwd, remotehost) are obtained
-#' 				from an external file config file. default to config::get().
-#'
-#' @return path of the dumped file
-#' @export
-#'
-#' @examples
-#' \dontrun{
-#'
-#' require(dup)
-#' Sys.setenv(R_CONFIG_ACTIVE = "localhost")
-#' txtdump(db = "ARGOS", table = "2019_LBDO")
-#' }
-#'
-txtdump <- function(db, table, remote = TRUE, dir = ".", cnf = config::get()) {
-  host <- cnf$host$name
-  user <- cnf$host$dbadmin
-  pwd <- cnf$host$dbpwd
-  remoteuser <- cnf$remotehost_1$dbadmin
-  remotepwd <- cnf$remotehost_1$syspwd
-  remotehost <- cnf$remotehost_1$name
-
-  con <- dbConnect(
-    RMariaDB::MariaDB(),
-    user = user,
-    password = pwd,
-    host = host,
-    db = db
-  )
-  on.exit(dbDisconnect(con))
-
-  x <- dbReadTable(con, table)
-  setDT(x)
-
-  if (!remote) {
-    path <- glue("{dir}/{table}.csv")
-    fwrite(x, path, yaml = TRUE)
-  }
-
-  if (remote) {
-    path <- glue("{tempdir()}/{table}.csv")
-    fwrite(x, path, yaml = TRUE)
-    ss <- ssh_connect(glue("{remoteuser}@{remotehost}"), passwd = remotepwd)
-    scp_upload(ss, path, to = dir, verbose = TRUE)
-    ssh_disconnect(ss)
-  }
-
-  glue("{dir}/{table}.csv")
 }
 
 
@@ -510,7 +417,7 @@ db_copy <- function(db, src, dst, cnf = config::get()) {
   src_dbpwd <- cnf[src][[1]]$dbpwd
 
   # get dump from remote
-  dump_path = mysqldump(
+  dump_path <- mysqldump(
     db = db,
     user = src_dbuser,
     pwd = src_dbpwd,

@@ -139,6 +139,29 @@ test_that("Kineis sensor preparation supports legacy JSON fragments", {
 })
 
 
+test_that("Kineis sensor preparation supports live API list columns", {
+  telemetry <- data.table(
+    deviceUid = c("123", "123"),
+    msgDatetime = c(
+      "2026-07-01T00:00:00.123Z",
+      "2026-07-01T00:01:00.456Z"
+    ),
+    sensors = list(
+      list(`BATTERY VOLTS` = "7.6", TEMPERATURE = "5.2"),
+      list(TEMPERATURE = "5.1")
+    )
+  )
+
+  result <- .kineis_prepare_sensors(telemetry)
+
+  expect_equal(
+    result$sensor,
+    c("BATTERY VOLTS", "TEMPERATURE", "TEMPERATURE")
+  )
+  expect_equal(result$value, c("7.6", "5.2", "5.1"))
+})
+
+
 test_that("Kineis Doppler preparation follows the MariaDB schema", {
   telemetry <- data.table(
     deviceUid = "123",
@@ -232,13 +255,171 @@ test_that("Kineis sensor insertion stages data and ignores stored keys", {
 })
 
 
-test_that("Kineis sensor updates overlap existing data", {
+test_that("Kineis Doppler insertion stages data and ignores stored keys", {
   calls <- new.env(parent = emptyenv())
-  calls$downloads <- list()
+  connection <- structure(list(), class = "test_connection")
 
   local_mocked_bindings(
-    .kineis_watermarks = function(devices, table) {
-      expect_equal(table, "sensors")
+    dbWriteTable = function(
+      connection,
+      name,
+      value,
+      temporary,
+      row.names
+    ) {
+      calls$stage_name <- name
+      calls$stage <- value
+      calls$temporary <- temporary
+      calls$row_names <- row.names
+      TRUE
+    },
+    dbExecute = function(connection, statement) {
+      calls$statement <- statement
+      1
+    },
+    .package = "DBI"
+  )
+
+  doppler <- data.table(
+    deviceUid = "123",
+    deviceRef = "device-a",
+    msgDatetime = "2026-07-01 00:00:00.123000",
+    acqDatetime = "2026-07-01 00:02:00.123000",
+    dopplerDatetime = "2026-07-01 00:03:00.123000",
+    dopplerLocLon = 8.3,
+    dopplerLocLat = 52.5,
+    dopplerLocAlt = 100,
+    dopplerLocErrorRadius = 1200,
+    dopplerLocClass = "A"
+  )
+
+  expect_equal(
+    .kineis_insert_doppler(doppler, connection = connection),
+    1
+  )
+  expect_equal(calls$stage_name, "kineis_doppler_stage")
+  expect_equal(calls$stage, doppler)
+  expect_true(calls$temporary)
+  expect_false(calls$row_names)
+  expect_match(calls$statement, "INSERT INTO doppler")
+  expect_match(
+    calls$statement,
+    "ON DUPLICATE KEY UPDATE\\s+deviceUid = VALUES\\(deviceUid\\)"
+  )
+})
+
+
+test_that("Kineis page persistence writes both outputs and its checkpoint", {
+  calls <- new.env(parent = emptyenv())
+  connection <- structure(list(), class = "test_connection")
+
+  local_mocked_bindings(
+    dbcon = function(db, server) connection,
+    .kineis_insert_sensors = function(sensors, connection) {
+      calls$sensors <- sensors
+      nrow(sensors)
+    },
+    .kineis_insert_doppler = function(doppler, connection) {
+      calls$doppler <- doppler
+      nrow(doppler)
+    },
+    .kineis_set_progress = function(
+      device_uid,
+      device_ref,
+      timestamp,
+      connection
+    ) {
+      calls$progress <- list(
+        device_uid = device_uid,
+        device_ref = device_ref,
+        timestamp = timestamp,
+        connection = connection
+      )
+      1
+    }
+  )
+  local_mocked_bindings(
+    dbWithTransaction = function(connection, code, ...) force(code),
+    dbDisconnect = function(connection) TRUE,
+    .package = "DBI"
+  )
+
+  page <- data.table(
+    deviceUid = c("123", "123"),
+    deviceRef = c("device-a", "device-a"),
+    msgDatetime = c(
+      "2026-07-01T00:00:00.123Z",
+      "2026-07-01T00:01:00.456Z"
+    ),
+    acqDatetime = c(
+      "2026-07-01T00:02:00.123Z",
+      "2026-07-01T00:03:00.456Z"
+    ),
+    sensors.TEMPERATURE = c("5.2", "5.1"),
+    dopplerDatetime = c("2026-07-01T00:03:00.123Z", NA_character_),
+    dopplerLocLon = c(8.3, NA_real_),
+    dopplerLocLat = c(52.5, NA_real_),
+    dopplerLocAlt = c(100, NA_real_),
+    dopplerLocErrorRadius = c(1200, NA_real_),
+    dopplerLocClass = c("A", NA_character_)
+  )
+
+  result <- .kineis_persist_page(page, "123", "device-a")
+
+  expect_equal(result$sensor_rows, 2L)
+  expect_equal(result$sensor_affected, 2L)
+  expect_equal(result$doppler_rows, 1L)
+  expect_equal(result$doppler_affected, 1L)
+  expect_equal(nrow(calls$sensors), 2L)
+  expect_equal(nrow(calls$doppler), 1L)
+  expect_equal(calls$progress$device_uid, "123")
+  expect_equal(calls$progress$device_ref, "device-a")
+  expect_equal(
+    calls$progress$timestamp,
+    "2026-07-01 00:01:00.456000"
+  )
+  expect_identical(calls$progress$connection, connection)
+})
+
+
+test_that("Kineis progress update is monotonic", {
+  calls <- new.env(parent = emptyenv())
+  connection <- structure(list(), class = "test_connection")
+
+  local_mocked_bindings(
+    dbExecute = function(connection, statement, params) {
+      calls$statement <- statement
+      calls$params <- params
+      1
+    },
+    .package = "DBI"
+  )
+
+  expect_equal(
+    .kineis_set_progress(
+      "123",
+      "device-a",
+      "2026-07-01T00:00:00.123Z",
+      connection = connection
+    ),
+    1
+  )
+  expect_match(calls$statement, "INSERT INTO telemetry_progress")
+  expect_match(calls$statement, "GREATEST")
+  expect_equal(
+    calls$params,
+    list("123", "device-a", "2026-07-01 00:00:00.123000")
+  )
+})
+
+
+test_that("Kineis telemetry updates both outputs in one API pass", {
+  calls <- new.env(parent = emptyenv())
+  calls$downloads <- list()
+  calls$completed <- list()
+
+  local_mocked_bindings(
+    .kineis_watermarks = function(devices) {
       data.table(
         deviceUid = c("1", "2"),
         deviceRef = c("new-device", "existing-device"),
@@ -265,18 +446,37 @@ test_that("Kineis sensor updates overlap existing data", {
       collect
     ) {
       calls$downloads[[device_refs]] <- as.list(environment())
-      page <- data.table(
+      page_handler(data.table(
         deviceUid = if (device_refs == "new-device") "1" else "2",
-        msgDatetime = "2026-07-20T00:00:00Z",
-        sensors.SENSOR1 = "7.6"
-      )
-      page_handler(page)
+        deviceRef = device_refs,
+        msgDatetime = "2026-07-20T00:00:00Z"
+      ))
       data.table()
     },
-    .kineis_insert_sensors = function(sensors) nrow(sensors)
+    .kineis_persist_page = function(
+      telemetry,
+      device_uid,
+      device_ref
+    ) {
+      list(
+        sensor_rows = 1L,
+        sensor_affected = 1L,
+        doppler_rows = 1L,
+        doppler_affected = 1L
+      )
+    },
+    .kineis_set_progress = function(
+      device_uid,
+      device_ref,
+      timestamp,
+      connection = NULL
+    ) {
+      calls$completed[[device_ref]] <- timestamp
+      1
+    }
   )
 
-  result <- .kineis_update_sensors(
+  result <- .kineis_update_telemetry(
     token = "token",
     api_telemetry_url = "https://api.example",
     devices = data.table(),
@@ -293,21 +493,27 @@ test_that("Kineis sensor updates overlap existing data", {
     "2026-07-18T00:00:00.000Z"
   )
   expect_true(calls$downloads[["new-device"]]$retrieve_sensors)
-  expect_false(calls$downloads[["new-device"]]$retrieve_doppler)
+  expect_true(calls$downloads[["new-device"]]$retrieve_doppler)
   expect_false(calls$downloads[["new-device"]]$verbose)
   expect_false(calls$downloads[["new-device"]]$collect)
+  expect_equal(
+    calls$completed[["new-device"]],
+    "2026-07-25T00:00:00.000Z"
+  )
   expect_true(all(result$success))
-  expect_equal(result$affected, c(1, 1))
+  expect_equal(result$downloaded, c(1L, 1L))
+  expect_equal(result$sensor_affected, c(1L, 1L))
+  expect_equal(result$doppler_affected, c(1L, 1L))
 })
 
 
-test_that("Kineis layer defers after an exhausted rate limit", {
+test_that("Kineis telemetry defers after an exhausted rate limit", {
   calls <- new.env(parent = emptyenv())
   calls$downloads <- 0L
-  calls$inserted <- 0L
+  calls$persisted <- 0L
 
   local_mocked_bindings(
-    .kineis_watermarks = function(devices, table) {
+    .kineis_watermarks = function(devices) {
       data.table(
         deviceUid = c("1", "2"),
         deviceRef = c("device-a", "device-b"),
@@ -319,18 +525,23 @@ test_that("Kineis layer defers after an exhausted rate limit", {
       arguments <- list(...)
       arguments$page_handler(data.table(
         deviceUid = "1",
-        msgDatetime = "2026-07-20T00:00:00Z",
-        sensors.SENSOR1 = "7.6"
+        deviceRef = "device-a",
+        msgDatetime = "2026-07-20T00:00:00Z"
       ))
       stop(kineis_rate_limit())
     },
-    .kineis_insert_sensors = function(sensors) {
-      calls$inserted <- calls$inserted + nrow(sensors)
-      nrow(sensors)
+    .kineis_persist_page = function(...) {
+      calls$persisted <- calls$persisted + 1L
+      list(
+        sensor_rows = 2L,
+        sensor_affected = 2L,
+        doppler_rows = 1L,
+        doppler_affected = 1L
+      )
     }
   )
 
-  result <- .kineis_update_sensors(
+  result <- .kineis_update_telemetry(
     token = "token",
     api_telemetry_url = "https://api.example",
     devices = data.table(),
@@ -339,20 +550,18 @@ test_that("Kineis layer defers after an exhausted rate limit", {
   )
 
   expect_equal(calls$downloads, 1L)
-  expect_equal(calls$inserted, 1L)
+  expect_equal(calls$persisted, 1L)
   expect_equal(nrow(result), 1L)
   expect_false(result$success)
   expect_true(result$deferred)
   expect_equal(result$downloaded, 1L)
-  expect_equal(result$affected, 1L)
+  expect_equal(result$sensor_affected, 2L)
+  expect_equal(result$doppler_affected, 1L)
   expect_match(result$error, "HTTP 429")
 })
 
 
-test_that("KINEIS update defers remaining layers without an error", {
-  calls <- new.env(parent = emptyenv())
-  calls$order <- character()
-
+test_that("KINEIS update returns a deferred telemetry summary", {
   local_mocked_bindings(
     .kineis_credentials = function() {
       list(
@@ -371,18 +580,13 @@ test_that("KINEIS update defers remaining layers without an error", {
     .kineis_current_datetime = function() {
       "2026-07-25T00:00:00.000Z"
     },
-    .kineis_update_sensors = function(...) {
-      calls$order <- c(calls$order, "sensors")
+    .kineis_update_telemetry = function(...) {
       data.table(
         deviceRef = "device-a",
         success = FALSE,
         deferred = TRUE,
         error = "HTTP 429 Too Many Requests."
       )
-    },
-    .kineis_update_doppler = function(...) {
-      calls$order <- c(calls$order, "doppler")
-      stop("Doppler should not run after a sensor deferral.")
     }
   )
 
@@ -393,20 +597,18 @@ test_that("KINEIS update defers remaining layers without an error", {
   )
 
   expect_false(result$visible)
-  expect_equal(calls$order, "sensors")
   expect_equal(result$value$status, "deferred")
   expect_true(result$value$deferred)
-  expect_equal(result$value$deferred_stage, "sensors")
+  expect_equal(result$value$deferred_stage, "telemetry")
   expect_equal(result$value$devices, 1L)
   expect_equal(result$value$error, "HTTP 429 Too Many Requests.")
-  expect_true(result$value$sensors$deferred)
-  expect_equal(nrow(result$value$doppler), 0L)
+  expect_true(result$value$telemetry$deferred)
 })
 
 
 test_that("KINEIS update defers a rate-limited device list", {
   calls <- new.env(parent = emptyenv())
-  calls$data_layers <- 0L
+  calls$telemetry <- 0L
 
   local_mocked_bindings(
     .kineis_credentials = function() {
@@ -423,11 +625,8 @@ test_that("KINEIS update defers a rate-limited device list", {
     kineis_devlist = function(token, api_telemetry_url, verbose) {
       stop(kineis_rate_limit())
     },
-    .kineis_update_sensors = function(...) {
-      calls$data_layers <- calls$data_layers + 1L
-    },
-    .kineis_update_doppler = function(...) {
-      calls$data_layers <- calls$data_layers + 1L
+    .kineis_update_telemetry = function(...) {
+      calls$telemetry <- calls$telemetry + 1L
     }
   )
 
@@ -438,7 +637,7 @@ test_that("KINEIS update defers a rate-limited device list", {
   )
 
   expect_false(result$visible)
-  expect_equal(calls$data_layers, 0L)
+  expect_equal(calls$telemetry, 0L)
   expect_equal(result$value$status, "deferred")
   expect_true(result$value$deferred)
   expect_equal(result$value$deferred_stage, "device list")
@@ -447,9 +646,9 @@ test_that("KINEIS update defers a rate-limited device list", {
 })
 
 
-test_that("KINEIS update runs both data layers in order", {
+test_that("KINEIS update runs one combined telemetry pass", {
   calls <- new.env(parent = emptyenv())
-  calls$order <- character()
+  calls$updates <- 0L
 
   local_mocked_bindings(
     .kineis_credentials = function() {
@@ -477,40 +676,31 @@ test_that("KINEIS update runs both data layers in order", {
     .kineis_current_datetime = function() {
       "2026-07-25T00:00:00.000Z"
     },
-    .kineis_update_sensors = function(
+    .kineis_update_telemetry = function(
       token,
       api_telemetry_url,
       devices,
       end_datetime,
       verbose
     ) {
-      calls$order <- c(calls$order, "sensors")
+      calls$updates <- calls$updates + 1L
       expect_false(verbose)
       expect_equal(end_datetime, "2026-07-25T00:00:00.000Z")
-      data.table(deviceRef = "device-a", success = TRUE)
-    },
-    .kineis_update_doppler = function(
-      token,
-      api_telemetry_url,
-      devices,
-      end_datetime,
-      verbose
-    ) {
-      calls$order <- c(calls$order, "doppler")
-      expect_false(verbose)
-      expect_equal(end_datetime, "2026-07-25T00:00:00.000Z")
-      data.table(deviceRef = "device-a", success = TRUE)
+      data.table(
+        deviceRef = "device-a",
+        success = TRUE,
+        deferred = FALSE
+      )
     }
   )
 
   result <- withVisible(KINEIS_update(verbose = FALSE))
 
   expect_false(result$visible)
-  expect_equal(calls$order, c("sensors", "doppler"))
+  expect_equal(calls$updates, 1L)
   expect_equal(result$value$status, "complete")
   expect_false(result$value$deferred)
   expect_true(is.na(result$value$deferred_stage))
   expect_equal(result$value$devices, 1)
-  expect_true(result$value$sensors$success)
-  expect_true(result$value$doppler$success)
+  expect_true(result$value$telemetry$success)
 })

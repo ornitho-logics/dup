@@ -2,13 +2,14 @@
 #'
 #' Logs in using the `kineis_api` configuration, retrieves the devices
 #' available to that profile, and updates the MariaDB `sensors` and `doppler`
-#' tables. Each device and data layer is updated independently.
+#' tables. Sensors and Doppler locations are requested together and written
+#' from the same chronologically ordered API pages.
 #'
-#' Devices without stored rows are downloaded from 2000-01-01. Existing devices
-#' are resumed two days before their latest stored message time, and rows whose
-#' database key is already present are left unchanged.
-#' Each chronologically ordered API page is written immediately, so an
-#' interrupted initial backfill resumes from the latest persisted page.
+#' Devices without a shared telemetry checkpoint are downloaded from
+#' 2000-01-01. Existing devices are resumed two days before their checkpoint,
+#' and rows whose database key is already present are left unchanged. Each page
+#' and its checkpoint are committed together, so an interrupted initial
+#' backfill resumes from the latest persisted page.
 #' Authentication tokens are renewed before expiry and after an unexpected
 #' HTTP 401 response. If HTTP 429 rate limiting is encountered (after automatic
 #' retries where configured), the update returns normally with a deferred
@@ -22,7 +23,7 @@
 #'   [interactive()].
 #'
 #' @return Invisibly, a list containing `status`, `deferred`,
-#'   `deferred_stage`, the device count, and sensor and Doppler update summaries
+#'   `deferred_stage`, the device count, and a combined telemetry update summary
 #'   by device. `status` is `"complete"` or `"deferred"`.
 #' @export
 KINEIS_update <- function(verbose = interactive()) {
@@ -70,7 +71,7 @@ KINEIS_update <- function(verbose = interactive()) {
   )
 
   end_datetime <- .kineis_current_datetime()
-  sensors <- .kineis_update_sensors(
+  telemetry <- .kineis_update_telemetry(
     token,
     api_telemetry_url = credentials$api_telemetry_url,
     devices = devices,
@@ -78,30 +79,12 @@ KINEIS_update <- function(verbose = interactive()) {
     verbose = verbose
   )
 
-  if (.kineis_was_deferred(sensors)) {
+  if (.kineis_was_deferred(telemetry)) {
     return(invisible(.kineis_deferred_update(
-      stage = "sensors",
+      stage = "telemetry",
       devices = nrow(devices),
-      sensors = sensors,
-      error = .kineis_deferred_error(sensors)
-    )))
-  }
-
-  doppler <- .kineis_update_doppler(
-    token,
-    api_telemetry_url = credentials$api_telemetry_url,
-    devices = devices,
-    end_datetime = end_datetime,
-    verbose = verbose
-  )
-
-  if (.kineis_was_deferred(doppler)) {
-    return(invisible(.kineis_deferred_update(
-      stage = "doppler",
-      devices = nrow(devices),
-      sensors = sensors,
-      doppler = doppler,
-      error = .kineis_deferred_error(doppler)
+      telemetry = telemetry,
+      error = .kineis_deferred_error(telemetry)
     )))
   }
 
@@ -112,8 +95,7 @@ KINEIS_update <- function(verbose = interactive()) {
     deferred = FALSE,
     deferred_stage = NA_character_,
     devices = nrow(devices),
-    sensors = sensors,
-    doppler = doppler,
+    telemetry = telemetry,
     error = NA_character_
   ))
 }
@@ -134,8 +116,7 @@ KINEIS_update <- function(verbose = interactive()) {
 .kineis_deferred_update <- function(
   stage,
   devices = NA_integer_,
-  sensors = data.table(),
-  doppler = data.table(),
+  telemetry = data.table(),
   error = NA_character_
 ) {
   message(
@@ -151,8 +132,7 @@ KINEIS_update <- function(verbose = interactive()) {
     deferred = TRUE,
     deferred_stage = stage,
     devices = devices,
-    sensors = sensors,
-    doppler = doppler,
+    telemetry = telemetry,
     error = error
   )
 }
@@ -584,32 +564,26 @@ KINEIS_update <- function(verbose = interactive()) {
   unique(output, by = c("deviceUid", "msgDatetime"))
 }
 
-.kineis_watermark_query <- function(table) {
-  table <- match.arg(table, c("sensors", "doppler"))
-
-  glue(
-    "
-    SELECT
-      deviceUid,
-      DATE_FORMAT(
-        MAX(msgDatetime),
-        '%Y-%m-%dT%H:%i:%s.%fZ'
-      ) AS last_timestamp
-    FROM {`table`}
-    GROUP BY deviceUid
-    "
-  ) |>
-    as.character()
+.kineis_progress_query <- function() {
+  "
+  SELECT
+    deviceUid,
+    DATE_FORMAT(
+      lastMsgDatetime,
+      '%Y-%m-%dT%H:%i:%s.%fZ'
+    ) AS last_timestamp
+  FROM telemetry_progress
+  "
 }
 
-.kineis_watermarks <- function(devices, table) {
+.kineis_watermarks <- function(devices) {
   devices <- data.table::copy(as.data.table(devices))
   connection <- dbcon(db = "KINEIS", server = "scidb")
   on.exit(DBI::dbDisconnect(connection))
 
   stored <- DBI::dbGetQuery(
     connection,
-    .kineis_watermark_query(table)
+    .kineis_progress_query()
   ) |>
     as.data.table()
 
@@ -634,13 +608,17 @@ KINEIS_update <- function(verbose = interactive()) {
   devices
 }
 
-.kineis_insert_sensors <- function(sensors) {
+.kineis_insert_sensors <- function(sensors, connection = NULL) {
   if (nrow(sensors) == 0) {
     return(0)
   }
 
-  connection <- dbcon(db = "KINEIS", server = "scidb")
-  on.exit(DBI::dbDisconnect(connection))
+  own_connection <- is.null(connection)
+
+  if (own_connection) {
+    connection <- dbcon(db = "KINEIS", server = "scidb")
+    on.exit(DBI::dbDisconnect(connection))
+  }
 
   DBI::dbWriteTable(
     connection,
@@ -670,13 +648,17 @@ KINEIS_update <- function(verbose = interactive()) {
   DBI::dbExecute(connection, statement)
 }
 
-.kineis_insert_doppler <- function(doppler) {
+.kineis_insert_doppler <- function(doppler, connection = NULL) {
   if (nrow(doppler) == 0) {
     return(0)
   }
 
-  connection <- dbcon(db = "KINEIS", server = "scidb")
-  on.exit(DBI::dbDisconnect(connection))
+  own_connection <- is.null(connection)
+
+  if (own_connection) {
+    connection <- dbcon(db = "KINEIS", server = "scidb")
+    on.exit(DBI::dbDisconnect(connection))
+  }
 
   DBI::dbWriteTable(
     connection,
@@ -718,8 +700,101 @@ KINEIS_update <- function(verbose = interactive()) {
   DBI::dbExecute(connection, statement)
 }
 
-.kineis_update_layer <- function(
-  layer,
+.kineis_set_progress <- function(
+  device_uid,
+  device_ref,
+  timestamp,
+  connection = NULL
+) {
+  own_connection <- is.null(connection)
+
+  if (own_connection) {
+    connection <- dbcon(db = "KINEIS", server = "scidb")
+    on.exit(DBI::dbDisconnect(connection))
+  }
+
+  statement <- "
+    INSERT INTO telemetry_progress (
+      deviceUid,
+      deviceRef,
+      lastMsgDatetime
+    )
+    VALUES (?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      deviceRef = VALUES(deviceRef),
+      lastMsgDatetime = GREATEST(
+        lastMsgDatetime,
+        VALUES(lastMsgDatetime)
+      )
+  "
+
+  DBI::dbExecute(
+    connection,
+    statement,
+    params = list(
+      as.character(device_uid),
+      as.character(device_ref),
+      .kineis_api_sql_time(timestamp)
+    )
+  )
+}
+
+.kineis_page_checkpoint <- function(telemetry) {
+  if (!"msgDatetime" %in% names(telemetry)) {
+    stop(
+      "Kineis telemetry page is missing `msgDatetime`.",
+      call. = FALSE
+    )
+  }
+
+  timestamps <- .kineis_api_sql_time(telemetry[["msgDatetime"]])
+  timestamps <- timestamps[!is.na(timestamps)]
+
+  if (length(timestamps) == 0) {
+    stop(
+      "Kineis telemetry page has no valid message timestamp.",
+      call. = FALSE
+    )
+  }
+
+  max(timestamps)
+}
+
+.kineis_persist_page <- function(telemetry, device_uid, device_ref) {
+  sensors <- .kineis_prepare_sensors(telemetry)
+  doppler <- .kineis_prepare_doppler(telemetry)
+  checkpoint <- .kineis_page_checkpoint(telemetry)
+  connection <- dbcon(db = "KINEIS", server = "scidb")
+  on.exit(DBI::dbDisconnect(connection))
+
+  affected <- DBI::dbWithTransaction(connection, {
+    sensor_affected <- .kineis_insert_sensors(
+      sensors,
+      connection = connection
+    )
+    doppler_affected <- .kineis_insert_doppler(
+      doppler,
+      connection = connection
+    )
+    .kineis_set_progress(
+      device_uid,
+      device_ref,
+      checkpoint,
+      connection = connection
+    )
+
+    list(
+      sensor_rows = nrow(sensors),
+      sensor_affected = sensor_affected,
+      doppler_rows = nrow(doppler),
+      doppler_affected = doppler_affected
+    )
+  })
+
+  affected
+}
+
+.kineis_update_telemetry <- function(
   token,
   api_telemetry_url,
   devices,
@@ -728,14 +803,12 @@ KINEIS_update <- function(verbose = interactive()) {
   initial_datetime = "2000-01-01T00:00:00.000Z",
   verbose = interactive()
 ) {
-  layer <- match.arg(layer, c("sensors", "doppler"))
-  label <- toupper(layer)
-  watermarks <- .kineis_watermarks(devices, layer)
+  watermarks <- .kineis_watermarks(devices)
   total_devices <- nrow(watermarks)
 
   .kineis_inform(
     verbose,
-    glue("{label}: {total_devices} device(s) to update.")
+    glue("TELEMETRY: {total_devices} device(s) to update.")
   )
 
   results <- vector("list", total_devices)
@@ -753,33 +826,35 @@ KINEIS_update <- function(verbose = interactive()) {
     .kineis_inform(
       verbose,
       glue(
-        "{label} [{i}/{total_devices}] {device_ref}: ",
+        "TELEMETRY [{i}/{total_devices}] {device_ref}: ",
         "downloading from {from}."
       )
     )
 
     downloaded_count <- 0L
-    affected_count <- 0L
-    persist_page <- function(downloaded) {
-      prepared <- if (identical(layer, "sensors")) {
-        .kineis_prepare_sensors(downloaded)
-      } else {
-        .kineis_prepare_doppler(downloaded)
-      }
-      affected <- if (identical(layer, "sensors")) {
-        .kineis_insert_sensors(prepared)
-      } else {
-        .kineis_insert_doppler(prepared)
-      }
+    sensor_rows <- 0L
+    sensor_affected <- 0L
+    doppler_rows <- 0L
+    doppler_affected <- 0L
 
+    persist_page <- function(downloaded) {
+      persisted <- .kineis_persist_page(
+        downloaded,
+        device_uid = device_uid,
+        device_ref = device_ref
+      )
       downloaded_count <<- downloaded_count + nrow(downloaded)
-      affected_count <<- affected_count + affected
+      sensor_rows <<- sensor_rows + persisted$sensor_rows
+      sensor_affected <<- sensor_affected + persisted$sensor_affected
+      doppler_rows <<- doppler_rows + persisted$doppler_rows
+      doppler_affected <<- doppler_affected + persisted$doppler_affected
+
       .kineis_inform(
         verbose,
         glue(
-          "{label} [{i}/{total_devices}] {device_ref}: ",
+          "TELEMETRY [{i}/{total_devices}] {device_ref}: ",
           "{downloaded_count} downloaded, ",
-          "{affected_count} inserted so far."
+          "{sensor_rows} sensor and {doppler_rows} Doppler rows prepared."
         )
       )
 
@@ -796,13 +871,19 @@ KINEIS_update <- function(verbose = interactive()) {
           device_refs = device_ref,
           retrieve_metadata = FALSE,
           retrieve_raw_data = FALSE,
-          retrieve_doppler = identical(layer, "doppler"),
+          retrieve_doppler = TRUE,
           retrieve_gps_loc = FALSE,
-          retrieve_sensors = identical(layer, "sensors"),
+          retrieve_sensors = TRUE,
           retrieve_additional_properties = FALSE,
           verbose = FALSE,
           page_handler = persist_page,
           collect = FALSE
+        )
+
+        .kineis_set_progress(
+          device_uid,
+          device_ref,
+          end_datetime
         )
 
         data.table(
@@ -811,7 +892,10 @@ KINEIS_update <- function(verbose = interactive()) {
           from = from,
           to = end_datetime,
           downloaded = downloaded_count,
-          affected = affected_count,
+          sensor_rows = sensor_rows,
+          sensor_affected = sensor_affected,
+          doppler_rows = doppler_rows,
+          doppler_affected = doppler_affected,
           success = TRUE,
           deferred = FALSE,
           error = NA_character_
@@ -835,7 +919,10 @@ KINEIS_update <- function(verbose = interactive()) {
             from = from,
             to = end_datetime,
             downloaded = downloaded_count,
-            affected = affected_count,
+            sensor_rows = sensor_rows,
+            sensor_affected = sensor_affected,
+            doppler_rows = doppler_rows,
+            doppler_affected = doppler_affected,
             success = FALSE,
             deferred = TRUE,
             error = conditionMessage(e)
@@ -847,8 +934,11 @@ KINEIS_update <- function(verbose = interactive()) {
           deviceRef = device_ref,
           from = from,
           to = end_datetime,
-          downloaded = NA_integer_,
-          affected = NA_integer_,
+          downloaded = downloaded_count,
+          sensor_rows = sensor_rows,
+          sensor_affected = sensor_affected,
+          doppler_rows = doppler_rows,
+          doppler_affected = doppler_affected,
           success = FALSE,
           deferred = FALSE,
           error = conditionMessage(e)
@@ -860,25 +950,27 @@ KINEIS_update <- function(verbose = interactive()) {
       .kineis_inform(
         verbose,
         glue(
-          "{label} [{i}/{total_devices}] {device_ref}: ",
+          "TELEMETRY [{i}/{total_devices}] {device_ref}: ",
           "{result$downloaded} downloaded, ",
-          "{result$affected} inserted."
+          "{result$sensor_affected} sensor and ",
+          "{result$doppler_affected} Doppler rows affected."
         )
       )
     } else if (result$deferred) {
       .kineis_inform(
         verbose,
         glue(
-          "{label} [{i}/{total_devices}] {device_ref}: ",
+          "TELEMETRY [{i}/{total_devices}] {device_ref}: ",
           "rate limited after {result$downloaded} downloaded and ",
-          "{result$affected} inserted; deferring remaining requests."
+          "{result$sensor_rows} sensor/{result$doppler_rows} Doppler rows ",
+          "prepared; deferring remaining requests."
         )
       )
     } else {
       .kineis_inform(
         verbose,
         glue(
-          "{label} [{i}/{total_devices}] {device_ref}: ",
+          "TELEMETRY [{i}/{total_devices}] {device_ref}: ",
           "failed: {result$error}"
         )
       )
@@ -906,7 +998,7 @@ KINEIS_update <- function(verbose = interactive()) {
   if (nrow(failed) > 0) {
     warning(
       glue(
-        "{label} update failed for {nrow(failed)} device(s): ",
+        "TELEMETRY update failed for {nrow(failed)} device(s): ",
         "{toString(failed$deviceRef)}"
       ),
       call. = FALSE
@@ -914,46 +1006,4 @@ KINEIS_update <- function(verbose = interactive()) {
   }
 
   result
-}
-
-.kineis_update_sensors <- function(
-  token,
-  api_telemetry_url,
-  devices,
-  end_datetime = .kineis_current_datetime(),
-  overlap = lubridate::days(2),
-  initial_datetime = "2000-01-01T00:00:00.000Z",
-  verbose = interactive()
-) {
-  .kineis_update_layer(
-    layer = "sensors",
-    token = token,
-    api_telemetry_url = api_telemetry_url,
-    devices = devices,
-    end_datetime = end_datetime,
-    overlap = overlap,
-    initial_datetime = initial_datetime,
-    verbose = verbose
-  )
-}
-
-.kineis_update_doppler <- function(
-  token,
-  api_telemetry_url,
-  devices,
-  end_datetime = .kineis_current_datetime(),
-  overlap = lubridate::days(2),
-  initial_datetime = "2000-01-01T00:00:00.000Z",
-  verbose = interactive()
-) {
-  .kineis_update_layer(
-    layer = "doppler",
-    token = token,
-    api_telemetry_url = api_telemetry_url,
-    devices = devices,
-    end_datetime = end_datetime,
-    overlap = overlap,
-    initial_datetime = initial_datetime,
-    verbose = verbose
-  )
 }

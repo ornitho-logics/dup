@@ -58,31 +58,34 @@ MariaDB primary keys make this overlap idempotent.
 
 ## Kinéis pipeline
 
-`KINEIS_update()` updates the `sensors` and `doppler` tables. Kinéis pagination
-occurs inside each device: a device with many messages can require many bulk API
-requests.
+`KINEIS_update()` requests sensors and Doppler together, then updates both
+tables from each page. Kinéis pagination occurs inside each device: a device
+with many messages can require many bulk API requests.
 
 ```text
 obtain or renew JWT
     ↓
-read device/layer watermark from MariaDB
+read shared telemetry checkpoint from MariaDB
     ↓
-request page in ascending msgDatetime order
+request one page with sensors and Doppler in ascending msgDatetime order
     ↓
-prepare sensor or Doppler rows
+prepare sensor and Doppler rows
     ↓
-write page through a temporary stage into KINEIS in MariaDB
+write both outputs and advance telemetry_progress in one transaction
     ↓
 read pageInfo$endCursor
     ↓
 request next cursor
     ↺ while pageInfo$hasNextPage is true
     ↓
-request next device/layer
+request next device
 ```
 
-Each Kinéis page is committed before the next cursor is requested. If rate
-limiting remains active after automatic retries, `KINEIS_update()` stops making
-requests and returns normally with `status = "deferred"`. The next scheduled run
-resumes from the latest persisted page with a two-day overlap. API calls are
-paced and retried; expired JWTs are renewed automatically.
+Each Kinéis page and its shared checkpoint are committed before the next cursor
+is requested. The initial combined run starts from 2000 for every device so it
+can recover historical Doppler rows that the former sensor-first pipeline never
+reached. If rate limiting remains active after automatic retries,
+`KINEIS_update()` stops making requests and returns normally with
+`status = "deferred"`. The next scheduled run resumes from the latest persisted
+page with a two-day overlap. API calls are paced and retried; expired JWTs are
+renewed automatically.
