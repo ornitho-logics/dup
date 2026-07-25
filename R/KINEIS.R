@@ -9,6 +9,8 @@
 #' database key is already present are left unchanged.
 #' Each chronologically ordered API page is written immediately, so an
 #' interrupted initial backfill resumes from the latest persisted page.
+#' Authentication tokens are renewed before expiry and after an unexpected
+#' HTTP 401 response.
 #'
 #' The public Kinéis authentication and telemetry endpoints are used when
 #' `auth_url` or `api_telemetry_url` is absent from the configuration. The
@@ -25,12 +27,8 @@ KINEIS_update <- function(verbose = interactive()) {
   .kineis_inform(verbose, "KINEIS: authenticating.")
   credentials <- .kineis_credentials()
 
-  token <- kineis_login(
-    un = credentials$un,
-    pwd = credentials$pwd,
-    auth_url = credentials$auth_url,
-    verbose = FALSE
-  )
+  token <- .kineis_token_provider(credentials)
+  token()
 
   .kineis_inform(verbose, "KINEIS: retrieving the device list.")
   devices <- kineis_devlist(
@@ -80,7 +78,7 @@ KINEIS_update <- function(verbose = interactive()) {
   if (length(missing_arguments) > 0) {
     stop(
       paste(
-        "KINEIS_update() requires apis >= 0.0.4.",
+        "KINEIS_update() requires apis >= 0.0.5.",
         "Restart R to unload the older apis namespace, then try again."
       ),
       call. = FALSE
@@ -143,6 +141,58 @@ KINEIS_update <- function(verbose = interactive()) {
   }
 
   credentials
+}
+
+
+.kineis_token_expired <- function(token, safety_seconds = 60) {
+  if (is.null(token)) {
+    return(TRUE)
+  }
+
+  if (
+    !is.list(token) ||
+      !.kineis_nonempty_string(token$access_token)
+  ) {
+    return(TRUE)
+  }
+
+  expires_in <- suppressWarnings(as.numeric(token$expires_in))
+  obtained_at <- suppressWarnings(as.POSIXct(
+    token$obtained_at,
+    tz = "UTC"
+  ))
+
+  if (
+    length(expires_in) != 1 ||
+      is.na(expires_in) ||
+      !is.finite(expires_in) ||
+      length(obtained_at) != 1 ||
+      is.na(obtained_at)
+  ) {
+    return(FALSE)
+  }
+
+  refresh_after <- max(expires_in - safety_seconds, 0)
+  Sys.time() >= obtained_at + refresh_after
+}
+
+
+.kineis_token_provider <- function(credentials) {
+  token <- NULL
+
+  function(force = FALSE) {
+    if (!isTRUE(force) && !.kineis_token_expired(token)) {
+      return(token)
+    }
+
+    token <<- kineis_login(
+      un = credentials$un,
+      pwd = credentials$pwd,
+      auth_url = credentials$auth_url,
+      verbose = FALSE
+    )
+    token
+  }
 }
 
 
@@ -673,6 +723,16 @@ KINEIS_update <- function(verbose = interactive()) {
         )
       },
       error = function(e) {
+        if (inherits(e, "httr2_http_401")) {
+          stop(
+            paste(
+              "Kineis authentication failed after automatic token",
+              "renewal; stopping this update."
+            ),
+            call. = FALSE
+          )
+        }
+
         if (inherits(e, "httr2_http_429")) {
           stop(
             paste(

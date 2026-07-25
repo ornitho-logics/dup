@@ -25,6 +25,8 @@ are resumed two days before their latest stored message time, and rows whose
 database key is already present are left unchanged.
 Each chronologically ordered API page is written immediately, so an
 interrupted initial backfill resumes from the latest persisted page.
+Authentication tokens are renewed before expiry and after an unexpected
+HTTP 401 response.
 
 The public Kinéis authentication and telemetry endpoints are used when
 \code{auth_url} or \code{api_telemetry_url} is absent from the configuration. The

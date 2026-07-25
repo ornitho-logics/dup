@@ -27,9 +27,41 @@ test_that("Kineis update requires the streaming API interface", {
 
   expect_error(
     .kineis_require_streaming_api(),
-    "requires apis >= 0.0.4",
+    "requires apis >= 0.0.5",
     fixed = TRUE
   )
+})
+
+
+test_that("Kineis token provider caches and renews login tokens", {
+  calls <- new.env(parent = emptyenv())
+  calls$logins <- 0L
+
+  local_mocked_bindings(
+    kineis_login = function(un, pwd, auth_url, verbose) {
+      calls$logins <- calls$logins + 1L
+      expect_equal(un, "username")
+      expect_equal(pwd, "password")
+      expect_equal(auth_url, "https://auth.example")
+      expect_false(verbose)
+      list(
+        access_token = paste0("token-", calls$logins),
+        expires_in = 3600,
+        obtained_at = Sys.time()
+      )
+    }
+  )
+
+  provider <- .kineis_token_provider(list(
+    un = "username",
+    pwd = "password",
+    auth_url = "https://auth.example"
+  ))
+
+  expect_equal(provider()$access_token, "token-1")
+  expect_equal(provider()$access_token, "token-1")
+  expect_equal(provider(force = TRUE)$access_token, "token-2")
+  expect_equal(calls$logins, 2L)
 })
 
 
@@ -331,7 +363,8 @@ test_that("KINEIS update runs both data layers in order", {
       list(access_token = "token")
     },
     kineis_devlist = function(token, api_telemetry_url, verbose) {
-      expect_equal(token$access_token, "token")
+      expect_true(is.function(token))
+      expect_equal(token()$access_token, "token")
       expect_equal(api_telemetry_url, "https://api.example")
       expect_false(verbose)
       data.table(deviceUid = "1", deviceRef = "device-a")
