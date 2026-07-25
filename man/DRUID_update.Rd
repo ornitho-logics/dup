@@ -8,7 +8,7 @@ DRUID_update(verbose = interactive())
 }
 \arguments{
 \item{verbose}{Show stage and per-device progress. Defaults to
-\code{interactive()}.}
+\code{\link[=interactive]{interactive()}}.}
 }
 \value{
 Invisibly, a list containing the number of devices added and GPS,

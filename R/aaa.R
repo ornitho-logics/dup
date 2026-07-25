@@ -1,4 +1,4 @@
-#' @import methods utils stats RMariaDB RSQLite data.table
+#' @import methods utils stats RMariaDB data.table
 #' @import dbo apis
 #' @import magrittr stringr glue anytime forcats
 #' @import foreach

@@ -16,8 +16,8 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 # 0 18 * * *  Rscript --default-packages=dup -e 'RUFFatSEEWIESEN_photos.pipeline()'
 
 
-#DRUID (every 3 hours)
-0 */3 * * * Rscript --default-packages=dup -e  'DRUID.downloadNew(what = "GPS", logfile =  "log_druid_GPS.csv");DRUID.downloadNew(what = "ODBA", logfile =  "log_druid_ODBA.csv");DRUID.downloadNew(what = "ENV", , logfile =  "log_druid_ENV.csv")'
+#DRUID (every 12 hours)
+0 */12 * * * Rscript --default-packages=dup -e  'DRUID_update()'
 
 
 

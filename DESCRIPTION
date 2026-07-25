@@ -13,9 +13,8 @@ Imports:
     stats,
     DBI,
     RMariaDB,
-    RSQLite,
     dbo,
-    apis,
+    apis (>= 0.0.3),
     magrittr,
     stringr,
     forcats,
@@ -33,7 +32,8 @@ Imports:
     webp,
     jpeg,
     imager,
-    lubridate
+    lubridate,
+    jsonlite
 Suggests:
     testthat (>= 3.0.0)
 Remotes: 
