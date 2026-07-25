@@ -1,54 +1,28 @@
-#' Backfill the Kineis database from the bulk API
+#' Update the Kineis database
 #'
-#' Logs in using the `kineis_api` configuration and backfills the MariaDB
-#' `sensors` and `doppler` tables. Each request covers all devices available to
-#' the login profile. Sensors and Doppler locations are requested together and
-#' written from the same chronologically ordered API pages.
-#'
-#' Historical time is divided into bounded windows. The bulk-count endpoint is
-#' used to shrink dense windows before downloading them. The active window and
-#' its pagination cursor are stored in MariaDB. Each page and its next cursor
-#' are committed together, so an interrupted backfill resumes at the next page
-#' instead of repeating a timestamp overlap. Rows whose database key is already
-#' present are left unchanged.
+#' Retrieves sensors and Doppler locations together from the Kinéis bulk API
+#' for every device available to the login profile. Time is processed in fixed
+#' one-day windows beginning at 2026-01-01. Each page and its next pagination
+#' cursor are committed together, so a deferred run resumes at the next page.
 #'
 #' Authentication tokens are renewed before expiry and after an unexpected
 #' HTTP 401 response. If the API remains rate limited or temporarily
 #' unavailable after automatic retries, the update returns normally with a
-#' deferred status. The next scheduled run resumes the same window and cursor.
+#' deferred status. The next daily run resumes the stored window and cursor.
 #'
 #' The public Kinéis authentication and telemetry endpoints are used when
 #' `auth_url` or `api_telemetry_url` is absent from the configuration. The
 #' `kineis_api` configuration must provide non-empty `un` and `pwd` values.
 #'
 #' @param verbose Show stage and window progress. Defaults to [interactive()].
-#' @param initial_datetime Initial historical boundary in UTC. It is used only
-#'   when the bulk progress table has no checkpoint.
-#' @param max_window_days Maximum number of days in a bulk-count window.
-#' @param min_window_hours Smallest window allowed when a dense interval is
-#'   repeatedly halved.
-#' @param target_messages Windows larger than this message count are halved
-#'   before retrieval, unless the minimum window size has been reached.
 #'
 #' @return Invisibly, a list containing `status`, `deferred`,
-#'   `deferred_stage`, and a bulk-window summary. `status` is `"complete"` or
+#'   `deferred_stage`, and a window summary. `status` is `"complete"` or
 #'   `"deferred"`.
 #' @export
-KINEIS_update_bulk <- function(
-  verbose = interactive(),
-  initial_datetime = "2000-01-01T00:00:00.000Z",
-  max_window_days = 365,
-  min_window_hours = 24,
-  target_messages = 1000
-) {
-  .kineis_require_bulk_api()
-  .kineis_validate_bulk_settings(
-    initial_datetime,
-    max_window_days,
-    min_window_hours,
-    target_messages
-  )
-  .kineis_inform(verbose, "KINEIS BULK: authenticating.")
+KINEIS_update <- function(verbose = interactive()) {
+  .kineis_require_api()
+  .kineis_inform(verbose, "KINEIS: authenticating.")
   credentials <- .kineis_credentials()
 
   token <- .kineis_token_provider(credentials)
@@ -62,32 +36,28 @@ KINEIS_update_bulk <- function(
 
   if (inherits(authentication, "httr2_http_429")) {
     return(invisible(.kineis_deferred_update(
-      stage = "bulk authentication",
+      stage = "authentication",
       error = conditionMessage(authentication)
     )))
   }
 
   target_datetime <- .kineis_current_datetime()
-  windows <- .kineis_update_bulk(
+  windows <- .kineis_update_telemetry(
     token,
     api_telemetry_url = credentials$api_telemetry_url,
     target_datetime = target_datetime,
-    initial_datetime = initial_datetime,
-    max_window_days = max_window_days,
-    min_window_hours = min_window_hours,
-    target_messages = target_messages,
     verbose = verbose
   )
 
   if (.kineis_was_deferred(windows)) {
     return(invisible(.kineis_deferred_update(
-      stage = "bulk telemetry",
+      stage = "telemetry",
       windows = windows,
       error = .kineis_deferred_error(windows)
     )))
   }
 
-  .kineis_inform(verbose, "KINEIS BULK: backfill complete.")
+  .kineis_inform(verbose, "KINEIS: update complete.")
 
   invisible(list(
     status = "complete",
@@ -119,8 +89,7 @@ KINEIS_update_bulk <- function(
   message(
     glue(
       "KINEIS: API access is temporarily unavailable during {stage}; ",
-      "update deferred. The next scheduled run will resume the persisted ",
-      "bulk window and cursor."
+      "update deferred. The next run will resume the stored window and cursor."
     )
   )
 
@@ -134,7 +103,7 @@ KINEIS_update_bulk <- function(
 }
 
 
-.kineis_require_bulk_api <- function() {
+.kineis_require_api <- function() {
   required_arguments <- c("page_handler", "collect", "after_cursor")
   available_arguments <- names(formals(kineis_data))
   missing_arguments <- setdiff(
@@ -142,56 +111,14 @@ KINEIS_update_bulk <- function(
     available_arguments
   )
 
-  if (
-    length(missing_arguments) > 0 ||
-      !exists("kineis_data_count", mode = "function")
-  ) {
+  if (length(missing_arguments) > 0) {
     stop(
       paste(
-        "KINEIS_update_bulk() requires apis >= 0.0.6.",
+        "KINEIS_update() requires apis >= 0.0.7.",
         "Restart R to unload the older apis namespace, then try again."
       ),
       call. = FALSE
     )
-  }
-
-  invisible(TRUE)
-}
-
-
-.kineis_validate_bulk_settings <- function(
-  initial_datetime,
-  max_window_days,
-  min_window_hours,
-  target_messages
-) {
-  initial <- ymd_hms(initial_datetime, tz = "UTC", quiet = TRUE)
-
-  if (length(initial) != 1 || is.na(initial)) {
-    stop("`initial_datetime` must be one valid UTC datetime.", call. = FALSE)
-  }
-
-  positive_scalar <- function(x) {
-    is.numeric(x) &&
-      length(x) == 1 &&
-      !is.na(x) &&
-      is.finite(x) &&
-      x > 0
-  }
-
-  if (!positive_scalar(max_window_days)) {
-    stop("`max_window_days` must be one positive number.", call. = FALSE)
-  }
-
-  if (!positive_scalar(min_window_hours)) {
-    stop("`min_window_hours` must be one positive number.", call. = FALSE)
-  }
-
-  if (
-    !positive_scalar(target_messages) ||
-      target_messages != floor(target_messages)
-  ) {
-    stop("`target_messages` must be one positive integer.", call. = FALSE)
   }
 
   invisible(TRUE)
@@ -563,32 +490,7 @@ KINEIS_update_bulk <- function(
   unique(output, by = c("deviceUid", "msgDatetime"))
 }
 
-.kineis_bulk_progress_ddl <- function() {
-  "
-  CREATE TABLE IF NOT EXISTS bulk_progress (
-    pipeline varchar(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    windowStart datetime(6) NOT NULL,
-    windowEnd datetime(6) NOT NULL,
-    afterCursor varchar(255) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
-    messageCount bigint unsigned DEFAULT NULL,
-    updatedAt timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
-      ON UPDATE CURRENT_TIMESTAMP(6),
-    PRIMARY KEY (pipeline)
-  )
-  ENGINE = InnoDB
-  DEFAULT CHARACTER SET = utf8mb4
-  COLLATE = utf8mb4_unicode_ci
-  COMMENT = 'Resumable account-wide Kineis bulk retrieval windows'
-  "
-}
-
-
-.kineis_ensure_bulk_progress <- function(connection) {
-  DBI::dbExecute(connection, .kineis_bulk_progress_ddl())
-}
-
-
-.kineis_bulk_progress_query <- function() {
+.kineis_progress_query <- function() {
   "
   SELECT
     DATE_FORMAT(
@@ -599,44 +501,36 @@ KINEIS_update_bulk <- function(
       windowEnd,
       '%Y-%m-%dT%H:%i:%s.%fZ'
     ) AS window_end,
-    afterCursor AS after_cursor,
-    messageCount AS message_count
-  FROM bulk_progress
-  WHERE pipeline = 'telemetry'
+    afterCursor AS after_cursor
+  FROM telemetry_progress
+  WHERE id = 1
   "
 }
 
 
-.kineis_bulk_progress <- function(initial_datetime) {
+.kineis_progress <- function() {
   connection <- dbcon(db = "KINEIS", server = "scidb")
   on.exit(DBI::dbDisconnect(connection))
-  .kineis_ensure_bulk_progress(connection)
 
   stored <- DBI::dbGetQuery(
     connection,
-    .kineis_bulk_progress_query()
+    .kineis_progress_query()
   ) |>
     as.data.table()
 
-  if (nrow(stored) == 0) {
-    initial <- .kineis_rfc3339(initial_datetime)
-
-    return(list(
-      window_start = initial,
-      window_end = initial,
-      after_cursor = NULL,
-      message_count = NULL
-    ))
+  if (nrow(stored) != 1) {
+    stop(
+      "KINEIS.telemetry_progress must contain its id = 1 row.",
+      call. = FALSE
+    )
   }
 
   cursor <- stored$after_cursor[1]
-  count <- suppressWarnings(as.numeric(stored$message_count[1]))
 
   list(
     window_start = .kineis_rfc3339(stored$window_start[1]),
     window_end = .kineis_rfc3339(stored$window_end[1]),
-    after_cursor = if (is.na(cursor) || !nzchar(cursor)) NULL else cursor,
-    message_count = if (is.na(count)) NULL else count
+    after_cursor = if (is.na(cursor) || !nzchar(cursor)) NULL else cursor
   )
 }
 
@@ -674,7 +568,7 @@ KINEIS_update_bulk <- function(
       value
     FROM kineis_sensors_stage
     ON DUPLICATE KEY UPDATE
-      deviceUid = VALUES(deviceUid)
+      value = VALUES(value)
   "
 
   DBI::dbExecute(connection, statement)
@@ -726,17 +620,23 @@ KINEIS_update_bulk <- function(
       dopplerLocClass
     FROM kineis_doppler_stage
     ON DUPLICATE KEY UPDATE
-      deviceUid = VALUES(deviceUid)
+      deviceRef = VALUES(deviceRef),
+      acqDatetime = VALUES(acqDatetime),
+      dopplerDatetime = VALUES(dopplerDatetime),
+      dopplerLocLon = VALUES(dopplerLocLon),
+      dopplerLocLat = VALUES(dopplerLocLat),
+      dopplerLocAlt = VALUES(dopplerLocAlt),
+      dopplerLocErrorRadius = VALUES(dopplerLocErrorRadius),
+      dopplerLocClass = VALUES(dopplerLocClass)
   "
 
   DBI::dbExecute(connection, statement)
 }
 
-.kineis_set_bulk_progress <- function(
+.kineis_set_progress <- function(
   window_start,
   window_end,
   after_cursor = NULL,
-  message_count = NULL,
   connection = NULL
 ) {
   own_connection <- is.null(connection)
@@ -744,35 +644,28 @@ KINEIS_update_bulk <- function(
   if (own_connection) {
     connection <- dbcon(db = "KINEIS", server = "scidb")
     on.exit(DBI::dbDisconnect(connection))
-    .kineis_ensure_bulk_progress(connection)
   }
 
   statement <- "
-    INSERT INTO bulk_progress (
-      pipeline,
-      windowStart,
-      windowEnd,
-      afterCursor,
-      messageCount
-    )
-    VALUES ('telemetry', ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      windowStart = VALUES(windowStart),
-      windowEnd = VALUES(windowEnd),
-      afterCursor = VALUES(afterCursor),
-      messageCount = VALUES(messageCount)
+    UPDATE telemetry_progress
+    SET
+      windowStart = ?,
+      windowEnd = ?,
+      afterCursor = ?
+    WHERE id = 1
   "
 
-  DBI::dbExecute(
+  affected <- DBI::dbExecute(
     connection,
     statement,
     params = list(
       .kineis_api_sql_time(window_start),
       .kineis_api_sql_time(window_end),
-      if (is.null(after_cursor)) NA_character_ else as.character(after_cursor),
-      if (is.null(message_count)) NA_real_ else as.numeric(message_count)
+      if (is.null(after_cursor)) NA_character_ else as.character(after_cursor)
     )
   )
+
+  affected
 }
 
 
@@ -799,19 +692,17 @@ KINEIS_update_bulk <- function(
 }
 
 
-.kineis_persist_bulk_page <- function(
+.kineis_persist_page <- function(
   telemetry,
   window_start,
   window_end,
-  page_info,
-  message_count
+  page_info
 ) {
   sensors <- .kineis_prepare_sensors(telemetry)
   doppler <- .kineis_prepare_doppler(telemetry)
   progress <- .kineis_page_progress(page_info)
   connection <- dbcon(db = "KINEIS", server = "scidb")
   on.exit(DBI::dbDisconnect(connection))
-  .kineis_ensure_bulk_progress(connection)
 
   affected <- DBI::dbWithTransaction(connection, {
     sensor_affected <- .kineis_insert_sensors(
@@ -824,17 +715,16 @@ KINEIS_update_bulk <- function(
     )
 
     if (progress$complete) {
-      .kineis_set_bulk_progress(
+      .kineis_set_progress(
         window_start = window_end,
         window_end = window_end,
         connection = connection
       )
     } else {
-      .kineis_set_bulk_progress(
+      .kineis_set_progress(
         window_start = window_start,
         window_end = window_end,
         after_cursor = progress$after_cursor,
-        message_count = message_count,
         connection = connection
       )
     }
@@ -868,30 +758,12 @@ KINEIS_update_bulk <- function(
 }
 
 
-.kineis_window_end <- function(start, target, max_window_days) {
+.kineis_window_end <- function(start, target) {
   start <- .kineis_time(start)
   target <- .kineis_time(target)
-  candidate <- start + lubridate::days(max_window_days)
+  candidate <- start + lubridate::days(1)
 
   .kineis_rfc3339(min(candidate, target))
-}
-
-
-.kineis_shrunk_window_end <- function(
-  start,
-  end,
-  min_window_hours
-) {
-  start <- .kineis_time(start)
-  end <- .kineis_time(end)
-  duration <- as.numeric(difftime(end, start, units = "secs"))
-  minimum <- min_window_hours * 60 * 60
-
-  if (duration <= minimum) {
-    return(NULL)
-  }
-
-  .kineis_rfc3339(start + max(duration / 2, minimum))
 }
 
 
@@ -904,10 +776,9 @@ KINEIS_update_bulk <- function(
 }
 
 
-.kineis_bulk_result <- function(
+.kineis_result <- function(
   window_start,
   window_end,
-  expected,
   downloaded = 0L,
   sensor_rows = 0L,
   sensor_affected = 0L,
@@ -920,7 +791,6 @@ KINEIS_update_bulk <- function(
   data.table(
     window_start = window_start,
     window_end = window_end,
-    expected = if (is.null(expected)) NA_real_ else as.numeric(expected),
     downloaded = as.integer(downloaded),
     sensor_rows = as.integer(sensor_rows),
     sensor_affected = as.integer(sensor_affected),
@@ -933,23 +803,19 @@ KINEIS_update_bulk <- function(
 }
 
 
-.kineis_update_bulk <- function(
+.kineis_update_telemetry <- function(
   token,
   api_telemetry_url,
   target_datetime,
-  initial_datetime,
-  max_window_days,
-  min_window_hours,
-  target_messages,
   verbose = interactive()
 ) {
-  state <- .kineis_bulk_progress(initial_datetime)
+  state <- .kineis_progress()
   target_datetime <- .kineis_rfc3339(target_datetime)
   results <- list()
 
   if (.kineis_time(state$window_start) > .kineis_time(target_datetime)) {
     stop(
-      "Kineis bulk checkpoint is later than the update target.",
+      "Kineis checkpoint is later than the update target.",
       call. = FALSE
     )
   }
@@ -961,12 +827,10 @@ KINEIS_update_bulk <- function(
     ) {
       state$window_end <- .kineis_window_end(
         state$window_start,
-        target_datetime,
-        max_window_days
+        target_datetime
       )
       state$after_cursor <- NULL
-      state$message_count <- NULL
-      .kineis_set_bulk_progress(
+      .kineis_set_progress(
         state$window_start,
         state$window_end
       )
@@ -975,140 +839,11 @@ KINEIS_update_bulk <- function(
     .kineis_inform(
       verbose,
       glue(
-        "KINEIS BULK [{state$window_start} \u2192 {state$window_end}]: ",
+        "KINEIS [{state$window_start} \u2192 {state$window_end}]: ",
         if (is.null(state$after_cursor)) {
-          "sizing window."
+          "downloading."
         } else {
           glue("resuming after cursor {state$after_cursor}.")
-        }
-      )
-    )
-
-    if (
-      is.null(state$after_cursor) &&
-        is.null(state$message_count)
-    ) {
-      count <- tryCatch(
-        kineis_data_count(
-          token,
-          api_telemetry_url = api_telemetry_url,
-          datetime = state$window_start,
-          end_datetime = state$window_end,
-          verbose = FALSE
-        ),
-        error = identity
-      )
-
-      if (inherits(count, "error")) {
-        if (inherits(count, "httr2_http_504")) {
-          smaller_end <- .kineis_shrunk_window_end(
-            state$window_start,
-            state$window_end,
-            min_window_hours
-          )
-
-          if (!is.null(smaller_end)) {
-            state$window_end <- smaller_end
-            .kineis_set_bulk_progress(
-              state$window_start,
-              state$window_end
-            )
-            .kineis_inform(
-              verbose,
-              glue(
-                "KINEIS BULK: count timed out; window reduced to end at ",
-                "{state$window_end}."
-              )
-            )
-            next
-          }
-        }
-
-        if (.kineis_is_temporary_api_error(count)) {
-          results[[length(results) + 1]] <- .kineis_bulk_result(
-            state$window_start,
-            state$window_end,
-            expected = NULL,
-            success = FALSE,
-            deferred = TRUE,
-            error = conditionMessage(count)
-          )
-          break
-        }
-
-        stop(count)
-      }
-
-      state$message_count <- count
-
-      if (count == 0) {
-        .kineis_set_bulk_progress(
-          state$window_end,
-          state$window_end
-        )
-        .kineis_inform(
-          verbose,
-          glue(
-            "KINEIS BULK [{state$window_start} \u2192 {state$window_end}]: ",
-            "empty; window complete."
-          )
-        )
-        results[[length(results) + 1]] <- .kineis_bulk_result(
-          state$window_start,
-          state$window_end,
-          expected = 0,
-          success = TRUE,
-          deferred = FALSE
-        )
-        state$window_start <- state$window_end
-        state$message_count <- NULL
-        next
-      }
-
-      smaller_end <- if (count > target_messages) {
-        .kineis_shrunk_window_end(
-          state$window_start,
-          state$window_end,
-          min_window_hours
-        )
-      } else {
-        NULL
-      }
-
-      if (!is.null(smaller_end)) {
-        .kineis_inform(
-          verbose,
-          glue(
-            "KINEIS BULK: {format(count, scientific = FALSE)} messages ",
-            "exceed the {target_messages} target; window reduced to end at ",
-            "{smaller_end}."
-          )
-        )
-        state$window_end <- smaller_end
-        state$message_count <- NULL
-        .kineis_set_bulk_progress(
-          state$window_start,
-          state$window_end
-        )
-        next
-      }
-
-      .kineis_set_bulk_progress(
-        state$window_start,
-        state$window_end,
-        message_count = state$message_count
-      )
-    }
-
-    .kineis_inform(
-      verbose,
-      glue(
-        "KINEIS BULK [{state$window_start} \u2192 {state$window_end}]: ",
-        "downloading ",
-        if (is.null(state$message_count)) {
-          "remaining messages."
-        } else {
-          glue("{format(state$message_count, scientific = FALSE)} messages.")
         }
       )
     )
@@ -1120,12 +855,11 @@ KINEIS_update_bulk <- function(
     doppler_affected <- 0L
 
     persist_page <- function(downloaded, page_info) {
-      persisted <- .kineis_persist_bulk_page(
+      persisted <- .kineis_persist_page(
         downloaded,
         window_start = state$window_start,
         window_end = state$window_end,
-        page_info = page_info,
-        message_count = state$message_count
+        page_info = page_info
       )
       downloaded_count <<- downloaded_count + nrow(downloaded)
       sensor_rows <<- sensor_rows + persisted$sensor_rows
@@ -1136,7 +870,7 @@ KINEIS_update_bulk <- function(
       .kineis_inform(
         verbose,
         glue(
-          "KINEIS BULK [{state$window_start} \u2192 {state$window_end}]: ",
+          "KINEIS [{state$window_start} \u2192 {state$window_end}]: ",
           "{downloaded_count} downloaded, ",
           "{sensor_rows} sensor and {doppler_rows} Doppler rows prepared."
         )
@@ -1165,15 +899,14 @@ KINEIS_update_bulk <- function(
           after_cursor = state$after_cursor
         )
 
-        .kineis_set_bulk_progress(
+        .kineis_set_progress(
           state$window_end,
           state$window_end
         )
 
-        .kineis_bulk_result(
+        .kineis_result(
           state$window_start,
           state$window_end,
-          expected = state$message_count,
           downloaded = downloaded_count,
           sensor_rows = sensor_rows,
           sensor_affected = sensor_affected,
@@ -1195,10 +928,9 @@ KINEIS_update_bulk <- function(
         }
 
         if (.kineis_is_temporary_api_error(e)) {
-          return(.kineis_bulk_result(
+          return(.kineis_result(
             state$window_start,
             state$window_end,
-            expected = state$message_count,
             downloaded = downloaded_count,
             sensor_rows = sensor_rows,
             sensor_affected = sensor_affected,
@@ -1220,7 +952,7 @@ KINEIS_update_bulk <- function(
       .kineis_inform(
         verbose,
         glue(
-          "KINEIS BULK [{state$window_start} \u2192 {state$window_end}]: ",
+          "KINEIS [{state$window_start} \u2192 {state$window_end}]: ",
           "temporarily unavailable after {downloaded_count} downloaded; ",
           "deferring remaining pages."
         )
@@ -1231,7 +963,7 @@ KINEIS_update_bulk <- function(
     .kineis_inform(
       verbose,
       glue(
-        "KINEIS BULK [{state$window_start} \u2192 {state$window_end}]: ",
+        "KINEIS [{state$window_start} \u2192 {state$window_end}]: ",
         "{downloaded_count} downloaded, ",
         "{sensor_affected} sensor and {doppler_affected} Doppler rows ",
         "affected; window complete."
@@ -1239,7 +971,6 @@ KINEIS_update_bulk <- function(
     )
     state$window_start <- state$window_end
     state$after_cursor <- NULL
-    state$message_count <- NULL
   }
 
   if (length(results) == 0) {

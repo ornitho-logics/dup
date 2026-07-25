@@ -58,18 +58,14 @@ MariaDB primary keys make this overlap idempotent.
 
 ## Kinéis pipeline
 
-`KINEIS_update_bulk()` performs the historical backfill. It requests sensors
-and Doppler together for all authorized devices and updates both tables from
-each page. The bulk-count endpoint keeps dense historical windows bounded.
+`KINEIS_update()` is the only Kinéis database pipeline. It requests sensors and
+Doppler together for all authorized devices and writes both tables from each
+page. It runs once per day and processes fixed one-day windows.
 
 ```text
 obtain or renew JWT
     ↓
-read active bulk window and cursor from MariaDB
-    ↓
-count all-device messages in the window
-    ↓
-halve the window when it exceeds the target size
+read active one-day window and cursor from MariaDB
     ↓
 request one all-device page with sensors and Doppler
     ↓
@@ -89,9 +85,8 @@ advance to the next window
 
 
 Each Kinéis page and its cursor are committed before the next cursor is
-requested. The first run starts at 2000-01-01 unless `bulk_progress` already
-contains a checkpoint. Empty windows are advanced without a data request. If
-rate limiting or a temporary API failure remains active after automatic
-retries, `KINEIS_update_bulk()` returns normally with `status = "deferred"`.
-The next scheduled run resumes the exact window and cursor. API calls are paced
-and expired JWTs are renewed automatically.
+requested. The clean initial state starts at 2026-01-01. If rate limiting or a
+temporary API failure remains active after automatic retries,
+`KINEIS_update()` returns normally with `status = "deferred"`. The next daily
+run resumes the exact window and cursor. API calls are paced and expired JWTs
+are renewed automatically.
