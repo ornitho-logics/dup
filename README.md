@@ -81,6 +81,7 @@ request next cursor
 request next device
 ```
 
+
 Each Kinéis page and its shared checkpoint are committed before the next cursor
 is requested. The initial combined run starts from 2000 for every device so it
 can recover historical Doppler rows that the former sensor-first pipeline never
