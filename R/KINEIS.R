@@ -7,6 +7,8 @@
 #' Devices without stored rows are downloaded from 2000-01-01. Existing devices
 #' are resumed two days before their latest stored message time, and rows whose
 #' database key is already present are left unchanged.
+#' Each chronologically ordered API page is written immediately, so an
+#' interrupted initial backfill resumes from the latest persisted page.
 #'
 #' The public Kinéis authentication and telemetry endpoints are used when
 #' `auth_url` or `api_telemetry_url` is absent from the configuration. The
@@ -596,9 +598,37 @@ KINEIS_update <- function(verbose = interactive()) {
       )
     )
 
+    downloaded_count <- 0L
+    affected_count <- 0L
+    persist_page <- function(downloaded) {
+      prepared <- if (identical(layer, "sensors")) {
+        .kineis_prepare_sensors(downloaded)
+      } else {
+        .kineis_prepare_doppler(downloaded)
+      }
+      affected <- if (identical(layer, "sensors")) {
+        .kineis_insert_sensors(prepared)
+      } else {
+        .kineis_insert_doppler(prepared)
+      }
+
+      downloaded_count <<- downloaded_count + nrow(downloaded)
+      affected_count <<- affected_count + affected
+      .kineis_inform(
+        verbose,
+        glue(
+          "{label} [{i}/{total_devices}] {device_ref}: ",
+          "{downloaded_count} downloaded, ",
+          "{affected_count} inserted so far."
+        )
+      )
+
+      invisible(NULL)
+    }
+
     result <- tryCatch(
       {
-        downloaded <- kineis_data(
+        kineis_data(
           token,
           api_telemetry_url = api_telemetry_url,
           datetime = from,
@@ -610,26 +640,18 @@ KINEIS_update <- function(verbose = interactive()) {
           retrieve_gps_loc = FALSE,
           retrieve_sensors = identical(layer, "sensors"),
           retrieve_additional_properties = FALSE,
-          verbose = FALSE
+          verbose = FALSE,
+          page_handler = persist_page,
+          collect = FALSE
         )
-        prepared <- if (identical(layer, "sensors")) {
-          .kineis_prepare_sensors(downloaded)
-        } else {
-          .kineis_prepare_doppler(downloaded)
-        }
-        affected <- if (identical(layer, "sensors")) {
-          .kineis_insert_sensors(prepared)
-        } else {
-          .kineis_insert_doppler(prepared)
-        }
 
         data.table(
           deviceUid = device_uid,
           deviceRef = device_ref,
           from = from,
           to = end_datetime,
-          downloaded = nrow(downloaded),
-          affected = affected,
+          downloaded = downloaded_count,
+          affected = affected_count,
           success = TRUE,
           error = NA_character_
         )

@@ -193,14 +193,18 @@ test_that("Kineis sensor updates overlap existing data", {
       retrieve_gps_loc,
       retrieve_sensors,
       retrieve_additional_properties,
-      verbose
+      verbose,
+      page_handler,
+      collect
     ) {
       calls$downloads[[device_refs]] <- as.list(environment())
-      data.table(
+      page <- data.table(
         deviceUid = if (device_refs == "new-device") "1" else "2",
         msgDatetime = "2026-07-20T00:00:00Z",
         sensors.SENSOR1 = "7.6"
       )
+      page_handler(page)
+      data.table()
     },
     .kineis_insert_sensors = function(sensors) nrow(sensors)
   )
@@ -224,6 +228,7 @@ test_that("Kineis sensor updates overlap existing data", {
   expect_true(calls$downloads[["new-device"]]$retrieve_sensors)
   expect_false(calls$downloads[["new-device"]]$retrieve_doppler)
   expect_false(calls$downloads[["new-device"]]$verbose)
+  expect_false(calls$downloads[["new-device"]]$collect)
   expect_true(all(result$success))
   expect_equal(result$affected, c(1, 1))
 })
@@ -232,6 +237,7 @@ test_that("Kineis sensor updates overlap existing data", {
 test_that("Kineis update stops after an exhausted rate limit", {
   calls <- new.env(parent = emptyenv())
   calls$downloads <- 0L
+  calls$inserted <- 0L
   rate_limit <- structure(
     list(
       message = "HTTP 429 Too Many Requests.",
@@ -256,7 +262,17 @@ test_that("Kineis update stops after an exhausted rate limit", {
     },
     kineis_data = function(...) {
       calls$downloads <- calls$downloads + 1L
+      arguments <- list(...)
+      arguments$page_handler(data.table(
+        deviceUid = "1",
+        msgDatetime = "2026-07-20T00:00:00Z",
+        sensors.SENSOR1 = "7.6"
+      ))
       stop(rate_limit)
+    },
+    .kineis_insert_sensors = function(sensors) {
+      calls$inserted <- calls$inserted + nrow(sensors)
+      nrow(sensors)
     }
   )
 
@@ -272,6 +288,7 @@ test_that("Kineis update stops after an exhausted rate limit", {
     fixed = TRUE
   )
   expect_equal(calls$downloads, 1L)
+  expect_equal(calls$inserted, 1L)
 })
 
 
