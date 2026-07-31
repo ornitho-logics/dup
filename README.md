@@ -95,7 +95,7 @@ JWTs are renewed automatically.
 
 ## GM Movebank pipeline
 
-`GM_update()` downloads all GPS events for `Nomadic shorebirds: GM`, including
+`GM_update()` downloads all GPS events including
 events outside a defined deployment. It stores only the GM measurements in the
 `GM.locations` table.
 
@@ -113,7 +113,3 @@ write through a temporary stage into GM.locations
 request the next one-day window
     ↺ until the current time is reached
 ```
-
-The overlap captures recently delivered or changed events. The `event_id`
-primary key makes repeated daily downloads idempotent. An empty table starts at
-2024-05-01, shortly before the first raw event in the study.
