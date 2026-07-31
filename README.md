@@ -92,3 +92,28 @@ If rate limiting or a temporary API failure remains active after automatic
 retries, the update returns normally with `status = "deferred"`. The next
 daily run resumes the exact window and cursor. API calls are paced and expired
 JWTs are renewed automatically.
+
+## GM Movebank pipeline
+
+`GM_update()` downloads all GPS events for `Nomadic shorebirds: GM`, including
+events outside a defined deployment. It stores only the GM measurements in the
+`GM.locations` table.
+
+```text
+read the latest location timestamp from MariaDB
+    ↓
+start two days before the watermark
+    ↓
+request one day of raw Movebank GPS events
+    ↓
+discard deployment and other reference metadata
+    ↓
+write through a temporary stage into GM.locations
+    ↓
+request the next one-day window
+    ↺ until the current time is reached
+```
+
+The overlap captures recently delivered or changed events. The `event_id`
+primary key makes repeated daily downloads idempotent. An empty table starts at
+2024-05-01, shortly before the first raw event in the study.
