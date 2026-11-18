@@ -5,9 +5,11 @@
 \title{db_copy
 database copy from src to dst. It has to be run on dst.}
 \usage{
-db_copy(db, src, dst, cnf = config::get())
+db_copy(db, src, dst, cnf = config::get(), tables = NULL)
 }
 \arguments{
+\item{db}{database name}
+
 \item{src}{source host}
 
 \item{dst}{destination host}
@@ -15,6 +17,10 @@ db_copy(db, src, dst, cnf = config::get())
 \item{cnf}{configuration variables are
 obtained from an external config file.
 default to config::get().}
+
+\item{tables}{optional character vector of table names to copy. When supplied,
+only these tables are dumped; all other tables and views are ignored.
+NULL (the default) copies the entire database.}
 }
 \description{
 db_copy
@@ -25,6 +31,8 @@ database copy from src to dst. It has to be run on dst.
 require(dup)
 Sys.setenv(R_CONFIG_ACTIVE = "localhost")
 db_copy(db = "FIELD_2024_NOLAatDUMMERSEE", src = "remotehost_1", dst ="host")
+db_copy(db = "FIELD_2024_NOLAatDUMMERSEE", src = "remotehost_1", dst = "host",
+        tables = c("observations", "locations"))
 }
 
 }

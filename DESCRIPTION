@@ -41,7 +41,7 @@ Remotes:
     ornitho-logics/dbo,   
     ornitho-logics/apis    
 SystemRequirements:
-    mpack, offlineimap, owncloud-client-cmd, libssh-dev, mysql-client, tailscale, dcraw, webp, imagemagick
+    mpack, offlineimap, owncloud-client-cmd, libssh-dev, mariadb-client, tailscale, dcraw, webp, imagemagick
 Description: ``scidb.mpio.orn.mpg.de`` Database Unattended Pipelines. Settings are given in an external `config.yml` file and by dbo::my.cnf(). 
 License: GPL(>= 2)
 URL: https://github.com/ornitho-logics/dup

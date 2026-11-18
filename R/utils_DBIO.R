@@ -39,7 +39,7 @@ mariacon <- function(db) {
 #' mysqldump
 #'
 #' @param db        db
-#' @param tables    tables are given as a "tableName1 tableName2".
+#' @param tables    character vector of table names (one name per element).
 #' @param user      user
 #' @param pwd       pwd
 #' @param host      default to '127.0.0.1'
@@ -57,7 +57,7 @@ mariacon <- function(db) {
 #' @examples
 #' \dontrun{
 #' fp = mysqldump('tests',  user = 'testuser', pwd = '', dir = tempdir(), filenam = "tempbk.sql" , dryrun = TRUE)
-#' mysqldump('tests', 't1 t2', 'testuser', pwd = '', dir = tempdir(), filenam = "tempbk.sql" , dryrun = TRUE)
+#' mysqldump('tests', c('t1', 't2'), 'testuser', pwd = '', dir = tempdir(), filenam = "tempbk.sql" , dryrun = TRUE)
 #' mysqldump('tests', 't1', 'testuser', pwd = '', dir = tempdir(), filenam = "tempbk.sql", compress = FALSE , dryrun = TRUE)
 #' }
 #'
@@ -80,28 +80,49 @@ mysqldump <- function(
 
   filepath <- paste(dir, filenam, sep = .Platform$file.sep)
 
-  syscall <- paste0(
-    'mariadb-dump --host=',
-    host,
-    ' --user=',
-    user,
-    ' --password=',
-    pwd,
-    ' --databases ',
-    db,
-    if (!missing(tables)) {
-      paste(' --tables ', paste(tables, collapse = " "))
-    } else {
-      NULL
-    },
-    ' --routines ',
-    if (!compress) paste0(' --result-file=', filepath) else NULL,
-    ' --default-character-set=utf8mb4 --max-allowed-packet=1073741824 --verbose --skip-comments',
-    ...
-  )
+  if (!missing(tables) && !length(tables)) {
+    stop("No tables selected; refusing to dump the entire database.")
+  }
 
+  # Keep each identifier and option value a single shell argument.
+  args <- c(
+    paste0('--host=', host),
+    paste0('--user=', user),
+    paste0('--password=', pwd),
+    '--routines',
+    '--default-character-set=utf8mb4',
+    '--max-allowed-packet=1073741824',
+    '--verbose',
+    '--skip-comments'
+  )
+  extra <- paste(unlist(list(...)), collapse = " ")
+  selection <- if (missing(tables)) {
+    c('--databases', db)
+  } else {
+    c('--tables', '--', db, tables)
+  }
+  # Stage uncompressed output so a failed dump cannot be hidden by gzip.
+  sql_path <- if (compress) {
+    tempfile('mariadb-dump-', tmpdir = dir)
+  } else {
+    filepath
+  }
+  syscall <- paste(
+    'mariadb-dump',
+    paste(shQuote(args), collapse = " "),
+    extra,
+    paste(shQuote(selection), collapse = " "),
+    '>',
+    shQuote(sql_path)
+  )
   if (compress) {
-    syscall <- paste0(syscall, " | gzip >", filepath)
+    syscall <- paste(
+      syscall,
+      '&& gzip -c',
+      shQuote(sql_path),
+      '>',
+      shQuote(filepath)
+    )
   }
 
   if (dryrun) {
@@ -109,8 +130,20 @@ mysqldump <- function(
     return(syscall)
   }
 
-  if (!dryrun) {
-    system(syscall, wait = TRUE)
+  if (!nzchar(Sys.which('mariadb-dump'))) {
+    stop("mariadb-dump is required; install the mariadb-client package.")
+  }
+  if (compress) {
+    on.exit(unlink(sql_path), add = TRUE)
+  }
+  status <- system(syscall, wait = TRUE)
+  if (status != 0L) {
+    unlink(filepath)
+    stop(
+      "Database dump failed (exit status ",
+      status,
+      "); restore was not started."
+    )
   }
 
   cat('Output file:', filepath, '\n')
@@ -389,12 +422,16 @@ mysqlrestore_host <- function(
 
 #' db_copy
 #' database copy from src to dst. It has to be run on dst.
+#' @param  db database name
 #' @param  src source host
 #' @param  dst destination host
 #' @param  cnf  configuration variables are
 #'              obtained from an external config file.
 #'              default to config::get().
 #'
+#' @param tables optional character vector of table names to copy. When supplied,
+#'   only these tables are dumped; all other tables and views are ignored.
+#'   NULL (the default) copies the entire database.
 #' @return NULL
 #' @export
 #'
@@ -403,10 +440,12 @@ mysqlrestore_host <- function(
 #' require(dup)
 #' Sys.setenv(R_CONFIG_ACTIVE = "localhost")
 #' db_copy(db = "FIELD_2024_NOLAatDUMMERSEE", src = "remotehost_1", dst ="host")
+#' db_copy(db = "FIELD_2024_NOLAatDUMMERSEE", src = "remotehost_1", dst = "host",
+#'         tables = c("observations", "locations"))
 #' }
 
 #'
-db_copy <- function(db, src, dst, cnf = config::get()) {
+db_copy <- function(db, src, dst, cnf = config::get(), tables = NULL) {
   # settings
   dst_host <- cnf[dst][[1]]$name
   dst_dbuser <- cnf[dst][[1]]$dbadmin
@@ -416,18 +455,21 @@ db_copy <- function(db, src, dst, cnf = config::get()) {
   src_dbuser <- cnf[src][[1]]$dbadmin
   src_dbpwd <- cnf[src][[1]]$dbpwd
 
-  # get dump from remote
-  dump_path <- mysqldump(
+  dump_args <- list(
     db = db,
     user = src_dbuser,
     pwd = src_dbpwd,
     host = src_host,
-    filenam = glue("{db}.sql"),
-    dir = fs::path_temp(),
-    dryrun = FALSE,
+    filenam = basename(tempfile('db-copy-', fileext = '.sql')),
+    dir = tempdir(),
     compress = FALSE
   )
-  on.exit(file.remove(dump_path))
+  if (!is.null(tables)) {
+    dump_args$tables <- tables
+  }
+
+  dump_path <- do.call(mysqldump, dump_args)
+  on.exit(unlink(dump_path), add = TRUE)
 
   # upload to local database
   mysqlrestore(dump_path, db, dst_dbuser, dst_dbpwd, dst_host)

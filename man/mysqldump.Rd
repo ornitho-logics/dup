@@ -20,7 +20,7 @@ mysqldump(
 \arguments{
 \item{db}{db}
 
-\item{tables}{tables are given as a "tableName1 tableName2".}
+\item{tables}{character vector of table names (one name per element).}
 
 \item{user}{user}
 
@@ -49,7 +49,7 @@ mysqldump
 \examples{
 \dontrun{
 fp = mysqldump('tests',  user = 'testuser', pwd = '', dir = tempdir(), filenam = "tempbk.sql" , dryrun = TRUE)
-mysqldump('tests', 't1 t2', 'testuser', pwd = '', dir = tempdir(), filenam = "tempbk.sql" , dryrun = TRUE)
+mysqldump('tests', c('t1', 't2'), 'testuser', pwd = '', dir = tempdir(), filenam = "tempbk.sql" , dryrun = TRUE)
 mysqldump('tests', 't1', 'testuser', pwd = '', dir = tempdir(), filenam = "tempbk.sql", compress = FALSE , dryrun = TRUE)
 }
 
