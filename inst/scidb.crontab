@@ -38,7 +38,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 # 0 2 * * *  Rscript --default-packages=dup -e 'db_copy("FIELD_2025_NOLAatDUMMERSEE", "remotehost_1", "host")'     
 
 #NZ
-0 */1  * * *  Rscript --default-packages=dup -e 'db_copy("FIELD_2025_BADOatNZ", "remotehost_1", "host")'
+0 16 * * *  Rscript --default-packages=dup -e 'db_copy("FIELD_2026_BADOatNZ", "remotehost_1", "host", tables = c("OBSERVERS", "CAPTURES", "NESTS", "EGGS", "RESIGHTINGS", "RESIGHTINGS_field", "RESIGHTINGS_PUBLIC", "GPS_POINTS", "GPS_TRACKS", "settings"))'
 
 # chick finder
 0 */12  * * *  Rscript --default-packages=dup -e 'db_copy("dotterelFinder", "remotehost_1", "host")'
