@@ -27,7 +27,7 @@ day.}
 Invisibly, a data table summarising each downloaded window.
 }
 \description{
-Downloads GPS events for the \verb{Nomadic shorebirds: GM} study directly from
+Downloads GPS events directly from
 the Movebank event endpoint. This includes events collected both during and
 outside defined deployments. Only GPS measurements are written to the GM
 \code{locations} table; deployment and other Movebank reference data are not
@@ -35,7 +35,7 @@ stored.
 }
 \details{
 Events are downloaded in one-day windows. An existing database resumes two
-days before its latest timestamp, while an empty database starts on
-2024-05-01. The overlap and the \code{event_id} primary key make daily runs
+days before its latest timestamp.
+The overlap and the \code{event_id} primary key make daily runs
 idempotent and allow recently changed records to be refreshed.
 }
